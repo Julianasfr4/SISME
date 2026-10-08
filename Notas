@@ -1,0 +1,595 @@
+# Análise rigorosa do trabalho RCC — Código, vídeo e enunciado
+
+Vou avaliar o trabalho como se estivesse a corrigi-lo enquanto docente de Sistemas e Interfaces para Sistemas Embebidos (SISEM), tendo em conta três aspetos:
+
+1. **Cumprimento do enunciado:** verificar se os seis exercícios estão corretamente resolvidos.
+2. **Correção técnica:** analisar as frequências, configurações RCC, PLL, barramentos APB1/APB2, memória Flash e funcionamento do programa.
+3. **Demonstração prática:** verificar se o vídeo comprova o comportamento pedido.
+
+## 1. O que exige o enunciado?
+
+A ficha exige as seguintes configurações:
+
+| Exercício | Configuração pedida | Frequência esperada |
+|---|---|---|
+| 1 | HSI sem PLL | 8 MHz |
+| 2 | HSI com PLL à frequência máxima | 64 MHz |
+| 3 | HSE sem PLL | 12 MHz |
+| 4 | HSE com PLL à frequência máxima | 72 MHz |
+| 5 | Configuração para 30 MHz | 30 MHz |
+| 6 | Alternar entre 30 MHz e 64 MHz a cada 10 piscadelas | 30 ↔ 64 MHz |
+
+O enunciado também estabelece uma condição importante: **os barramentos associados a PCLK1 e PCLK2 devem funcionar à frequência máxima possível para o SYSCLK obtido**, respeitando os limites do microcontrolador. FichaDeTrabalho2_RCC
+
+**Primeira conclusão:** os valores de frequência que escolheste para os cinco primeiros exercícios estão corretos, considerando um STM32F103 com cristal externo de 12 MHz.
+
+No entanto, existem alguns aspetos de implementação que merecem atenção antes da entrega, especialmente no exercício 6.
+
+## 2. Análise técnica de cada exercício
+
+### Exercício 1 — HSI a 8 MHz
+
+**Veredito: CORRETO. ✅**
+
+A função:
+
+```c
+void RCC_Config_HSI_default(void)
+```
+
+faz corretamente o seguinte:
+
+- Reinicializa a configuração RCC.
+- Ativa o HSI.
+- Aguarda que o oscilador esteja pronto.
+- Configura a latência da Flash para 0 estados de espera.
+- Configura os barramentos sem divisões.
+- Seleciona o HSI como fonte do SYSCLK.
+
+As frequências resultantes são:
+
+| Parâmetro | Frequência |
+|---|---|
+| SYSCLK | 8 MHz |
+| HCLK | 8 MHz |
+| PCLK1 | 8 MHz |
+| PCLK2 | 8 MHz |
+
+A instrução:
+
+```c
+while(RCC_GetSYSCLKSource() != 0x00);
+```
+
+também está correta.
+
+**Não é necessário alterar a lógica deste exercício.**
+
+---
+
+### Exercício 2 — HSI com PLL à frequência máxima
+
+**Veredito: CORRETO. ✅**
+
+A configuração:
+
+```c
+RCC_PLLConfig(RCC_PLLSource_HSI_Div2, RCC_PLLMul_16);
+```
+
+produz:
+
+\[
+f_{PLL}=\frac{8}{2}\times16=64\text{ MHz}
+\]
+
+Este é o valor máximo possível utilizando o HSI com PLL neste microcontrolador.
+
+A configuração dos barramentos também está correta:
+
+| Parâmetro | Frequência |
+|---|---|
+| SYSCLK | 64 MHz |
+| HCLK | 64 MHz |
+| PCLK1 | 32 MHz |
+| PCLK2 | 64 MHz |
+
+O PCLK1 não pode funcionar a 64 MHz porque o limite é 36 MHz. Por isso, a divisão por 2 está correta.
+
+Também configuraste corretamente:
+
+```c
+FLASH_SetLatency(FLASH_Latency_2);
+FLASH_PrefetchBufferCmd(FLASH_PrefetchBuffer_Enable);
+```
+
+A latência de 2 estados de espera é apropriada para 64 MHz.
+
+**Não encontrei erros nas frequências deste exercício.**
+
+---
+
+### Exercício 3 — HSE a 12 MHz
+
+**Veredito: CORRETO, assumindo cristal de 12 MHz. ✅**
+
+A configuração:
+
+```c
+RCC_HSEConfig(RCC_HSE_ON);
+```
+
+ativa o oscilador externo.
+
+Depois utilizas:
+
+```c
+HSEStartUpStatus = RCC_WaitForHSEStartUp();
+```
+
+para verificar se arrancou corretamente.
+
+Esta verificação é uma boa prática.
+
+As frequências obtidas são:
+
+| Parâmetro | Frequência |
+|---|---|
+| SYSCLK | 12 MHz |
+| HCLK | 12 MHz |
+| PCLK1 | 12 MHz |
+| PCLK2 | 12 MHz |
+
+A latência:
+
+```c
+FLASH_SetLatency(FLASH_Latency_0);
+```
+
+também está correta.
+
+**Este exercício está bem resolvido.**
+
+---
+
+### Exercício 4 — HSE com PLL a 72 MHz
+
+**Veredito: CORRETO. ✅**
+
+Utilizas:
+
+```c
+RCC_PLLConfig(RCC_PLLSource_HSE_Div1, RCC_PLLMul_6);
+```
+
+O cálculo é:
+
+\[
+f_{PLL}=12\times6=72\text{ MHz}
+\]
+
+Esta é a frequência máxima de funcionamento do STM32F103.
+
+As frequências resultantes são:
+
+| Parâmetro | Frequência |
+|---|---|
+| SYSCLK | 72 MHz |
+| HCLK | 72 MHz |
+| PCLK1 | 36 MHz |
+| PCLK2 | 72 MHz |
+
+Está tudo dentro dos limites.
+
+Também configuraste corretamente a Flash para 2 estados de espera.
+
+**Este exercício cumpre o enunciado.**
+
+---
+
+### Exercício 5 — Frequência de 30 MHz
+
+**Veredito: CORRETO. ✅**
+
+A tua solução foi:
+
+```c
+RCC_PLLConfig(RCC_PLLSource_HSE_Div2, RCC_PLLMul_5);
+```
+
+O cálculo é:
+
+\[
+f_{PLL}=\frac{12}{2}\times5=30\text{ MHz}
+\]
+
+Está correto.
+
+Também justificaste corretamente por que razão não utilizaste o HSI.
+
+Com HSI:
+
+\[
+\frac{8}{2}=4\text{ MHz}
+\]
+
+Para obter 30 MHz:
+
+\[
+\frac{30}{4}=7,5
+\]
+
+Como o multiplicador não admite esse valor, não consegues obter exatamente 30 MHz através do HSI.
+
+As frequências são:
+
+| Parâmetro | Frequência |
+|---|---|
+| SYSCLK | 30 MHz |
+| HCLK | 30 MHz |
+| PCLK1 | 30 MHz |
+| PCLK2 | 30 MHz |
+
+A configuração:
+
+```c
+FLASH_SetLatency(FLASH_Latency_1);
+```
+
+é segura para 30 MHz.
+
+**Este exercício também está corretamente resolvido.**
+
+---
+
+## 3. Exercício 6 — Alternância entre 30 MHz e 64 MHz
+
+Este é o exercício mais importante para a avaliação do programa completo.
+
+**Veredito: A LÓGICA ESTÁ CORRETA, MAS EXISTEM DOIS PROBLEMAS TÉCNICOS A CORRIGIR. ⚠️**
+
+O enunciado exige que o microcontrolador:
+
+1. Funcione a 30 MHz durante 10 piscadelas.
+2. Passe a 64 MHz durante outras 10 piscadelas.
+3. Repita continuamente este ciclo.
+
+É precisamente essa a sequência que programaste.
+
+### 3.1. Alternância das frequências
+
+Tens:
+
+```c
+while(1){
+
+    RCC_Config_30MHz();
+
+    for (int i = 0; i < 10; i++){
+        GPIOA->BSRR = 0x00000020;
+        delay(500000);
+
+        GPIOA->BSRR = 0x00200000;
+        delay(500000);
+    }
+
+    RCC_Config_HSI_PLL_Max();
+
+    for (int i = 0; i < 10; i++){
+        GPIOA->BSRR = 0x00000020;
+        delay(500000);
+
+        GPIOA->BSRR = 0x00200000;
+        delay(500000);
+    }
+}
+```
+
+**A estrutura está correta.**
+
+Cada ciclo do `for` liga e desliga o LED uma vez.
+
+Portanto:
+
+- Primeiro `for`: 10 piscadelas a 30 MHz.
+- Segundo `for`: 10 piscadelas a 64 MHz.
+- `while(1)`: repetição contínua.
+
+Não existe um erro na contagem das piscadelas.
+
+### 3.2. Problema importante: reinicialização do RCC
+
+Existe, contudo, uma situação que deves corrigir.
+
+As duas funções começam com:
+
+```c
+RCC_DeInit();
+```
+
+Esta função reinicializa a configuração RCC, incluindo os sinais de ativação dos relógios dos periféricos.
+
+No início do `main()`, ativaste o GPIOA:
+
+```c
+RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE);
+```
+
+Mas, quando executas:
+
+```c
+RCC_Config_30MHz();
+```
+
+a chamada a `RCC_DeInit()` desativa novamente o relógio do GPIOA.
+
+Isto é importante porque, depois, utilizas:
+
+```c
+GPIOA->BSRR = 0x00000020;
+```
+
+e:
+
+```c
+GPIOA->BSRR = 0x00200000;
+```
+
+Sem o relógio do GPIOA ativo, não podes contar com o funcionamento correto dessas operações.
+
+**Esta é a principal correção que faria antes de entregar.**
+
+A solução mais simples é voltar a ativar o relógio do GPIOA depois de cada alteração da frequência.
+
+Por exemplo:
+
+```c
+while(1){
+
+    RCC_Config_30MHz();
+
+    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE);
+
+    for (int i = 0; i < 10; i++){
+
+        GPIOA->BSRR = 0x00000020;
+        delay(500000);
+
+        GPIOA->BSRR = 0x00200000;
+        delay(500000);
+    }
+
+    RCC_Config_HSI_PLL_Max();
+
+    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE);
+
+    for (int i = 0; i < 10; i++){
+
+        GPIOA->BSRR = 0x00000020;
+        delay(500000);
+
+        GPIOA->BSRR = 0x00200000;
+        delay(500000);
+    }
+}
+```
+
+Esta alteração é pequena, mas tecnicamente importante.
+
+Não precisas de repetir toda a inicialização do GPIOA: basta reativar o respetivo relógio.
+
+### 3.3. Problema com a função delay()
+
+A tua função é:
+
+```c
+void delay(uint32_t n) {
+    volatile uint32_t i;
+    for (i = 0; i < n; i++);
+}
+```
+
+Esta função funciona como um atraso por software.
+
+Contudo, o atraso depende da frequência do processador.
+
+Quando o microcontrolador funciona a 30 MHz, o ciclo demora mais tempo.
+
+Quando funciona a 64 MHz, demora menos tempo.
+
+Por isso, o LED deve piscar mais rapidamente na segunda fase.
+
+Isto não é necessariamente um erro.
+
+Aliás, pode ser útil para demonstrar visualmente que o microcontrolador está a funcionar a frequências diferentes.
+
+**Mas atenção:** esta função não permite garantir um atraso exato em milissegundos.
+
+O tempo também depende do código gerado pelo compilador e das opções de otimização.
+
+Para este trabalho, considerando que o enunciado não exige atrasos temporais exatos, considero a solução aceitável.
+
+---
+
+## 4. Análise do vídeo enviado
+
+Examinei o vídeo `VID-20261008-WA0069.mp4`.
+
+O ficheiro tem aproximadamente **10,6 segundos**, com uma frequência de cerca de 30 imagens por segundo.
+
+### O que consegui verificar
+
+No vídeo é possível observar:
+
+- Uma placa de desenvolvimento STM32 da STMicroelectronics.
+- A placa ligada através de USB.
+- LEDs indicadores acesos.
+- Alterações visuais nos indicadores luminosos durante a gravação.
+
+A gravação mostra uma demonstração física do circuito, o que é positivo para a entrega.
+
+### O que o vídeo não permite confirmar com segurança
+
+Há uma diferença importante entre observar LEDs a piscar e comprovar que o microcontrolador está efetivamente a alternar entre 30 MHz e 64 MHz.
+
+O vídeo não apresenta medições de frequência nem informação de depuração.
+
+Além disso, a gravação é relativamente curta.
+
+Assim, **não consigo confirmar rigorosamente, apenas através do vídeo, que ocorrem exatamente 10 piscadelas em cada frequência e que a alternância se repete corretamente**.
+
+Também não é possível identificar com segurança, a partir da gravação, se o LED que muda de estado é efetivamente o ligado ao PA5.
+
+Isto não significa que o programa esteja necessariamente a funcionar mal. Significa que o vídeo, por si só, não constitui uma prova completa do comportamento exigido.
+
+### Uma questão importante sobre a placa
+
+O código utiliza:
+
+```c
+GPIO_Pin_5
+```
+
+ou seja, PA5.
+
+Em algumas placas STM32 Nucleo, o LED de utilizador está ligado ao PA5. Noutras placas, o LED pode estar ligado a outro pino.
+
+É importante confirmar o modelo exato da placa e a ligação do LED.
+
+Se o LED de utilizador estiver ligado ao PA5, essa parte do código está correta.
+
+---
+
+## 5. Outras melhorias que recomendo
+
+Existem ainda alguns pormenores que não considero erros graves, mas que melhorariam a qualidade da entrega.
+
+### A) Corrigir os comentários
+
+Encontrei pequenos erros de escrita, como:
+
+```c
+// onfigurar o PLL como clock
+```
+
+Deveria ser:
+
+```c
+// Configurar a PLL como fonte do relógio do sistema
+```
+
+Também tens:
+
+```c
+// de maneira a acelaramos o processo pois a frq é máx
+```
+
+Podes substituir por:
+
+```c
+// Ativar o prefetch da Flash para melhorar o desempenho
+```
+
+Estes detalhes não afetam o funcionamento, mas tornam o trabalho mais profissional.
+
+### B) Melhorar a ordem da configuração dos barramentos
+
+Nas funções, utilizas:
+
+```c
+RCC_PCLK1Config(RCC_HCLK_Div2);
+RCC_PCLK2Config(RCC_HCLK_Div1);
+RCC_HCLKConfig(RCC_SYSCLK_Div1);
+```
+
+Para facilitar a leitura, sugiro configurar primeiro o HCLK:
+
+```c
+RCC_HCLKConfig(RCC_SYSCLK_Div1);
+RCC_PCLK1Config(RCC_HCLK_Div2);
+RCC_PCLK2Config(RCC_HCLK_Div1);
+```
+
+A ordem original não constitui, neste caso, um erro funcional.
+
+### C) Evitar números mágicos
+
+Utilizas:
+
+```c
+while(RCC_GetSYSCLKSource() != 0x08);
+```
+
+Está correto para a biblioteca STM32F10x Standard Peripheral Library.
+
+No entanto, seria útil acrescentar um comentário:
+
+```c
+while(RCC_GetSYSCLKSource() != 0x08);
+// 0x08 indica que a PLL está a ser utilizada como SYSCLK
+```
+
+Assim, o professor percebe imediatamente que conheces o significado do valor.
+
+### D) Confirmar a atualização de SystemCoreClock
+
+Depois de alterar a frequência do processador, é boa prática executar:
+
+```c
+SystemCoreClockUpdate();
+```
+
+Isto atualiza a variável global `SystemCoreClock`, utilizada por algumas funções e bibliotecas.
+
+No teu programa, como utilizas um atraso por software e não dependes dessa variável, a ausência desta chamada não impede necessariamente o funcionamento.
+
+Ainda assim, é uma melhoria recomendável.
+
+---
+
+# 6. Avaliação final do trabalho
+
+Considerando o código, o enunciado e aquilo que é possível observar no vídeo:
+
+| Critério | Avaliação |
+|---|---|
+| Exercício 1 — HSI 8 MHz | ✅ Correto |
+| Exercício 2 — HSI + PLL 64 MHz | ✅ Correto |
+| Exercício 3 — HSE 12 MHz | ✅ Correto |
+| Exercício 4 — HSE + PLL 72 MHz | ✅ Correto |
+| Exercício 5 — PLL 30 MHz | ✅ Correto |
+| Exercício 6 — Alternância de frequências | ⚠️ Lógica correta, mas requer correção |
+| Configuração da Flash | ✅ Correta |
+| Limites dos barramentos | ✅ Respeitados |
+| Inicialização do GPIOA | ⚠️ Relógio desativado por `RCC_DeInit()` |
+| Função de atraso | ✅ Aceitável, mas imprecisa |
+| Clareza dos comentários | 🟡 Pode melhorar |
+| Demonstração no vídeo | 🟡 Parcial, sem confirmação das frequências |
+
+## 7. Está pronto para entregar?
+
+**A minha resposta é: está muito próximo, mas eu não o entregaria ainda sem fazer uma pequena correção e testar novamente.**
+
+A resolução teórica das frequências está correta.
+
+Os cinco primeiros exercícios cumprem o que é pedido.
+
+O sexto exercício também apresenta a sequência certa, mas existe um problema real com a desativação do relógio do GPIOA.
+
+### O que faria antes de entregar
+
+1. **Adicionar `RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE);` depois de cada configuração RCC no `while(1)`.**
+2. Compilar e executar novamente o programa na placa.
+3. Confirmar que o LED pisca 10 vezes mais lentamente e depois 10 vezes mais rapidamente, repetindo o ciclo.
+4. Gravar um vídeo mais longo, mostrando pelo menos dois ciclos completos.
+5. Corrigir os pequenos erros de escrita nos comentários.
+
+### Nota estimada
+
+Se estivesse a avaliar apenas a correção dos cálculos e a estrutura das funções RCC, a resolução seria muito boa.
+
+Contudo, não atribuiria uma nota definitiva sem verificar o funcionamento real do exercício 6 e confirmar o modelo da placa.
+
+**Conclusão:** o trabalho demonstra uma boa compreensão do RCC, das fontes HSI/HSE e da PLL. A principal questão não é o cálculo das frequências, mas garantir que o GPIOA continua operacional após as alterações do relógio.
+
+**Quero confirmar contigo apenas uma coisa: a placa que aparece no vídeo é uma STM32 Nucleo-F103RB?** Isso permite-me verificar se o PA5 corresponde ao LED de utilizador e fechar a avaliação técnica com maior segurança.
