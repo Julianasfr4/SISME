@@ -28,6 +28,7 @@ int main(void)
     RCC_HCLKConfig(RCC_SYSCLK_Div1);   // HCLK = 72 MHz
     RCC_PCLK1Config(RCC_HCLK_Div2);    // PCLK1 = 36 MHz
     RCC_PCLK2Config(RCC_HCLK_Div1);    // PCLK2 = 72 MHz
+    RCC_ADCCLKConfig(RCC_PCLK2_Div6);
 
     // Configurar a PLL: 8 MHz x 9 = 72 MHz
     RCC_PLLConfig(RCC_PLLSource_HSE_Div1, RCC_PLLMul_6);
@@ -47,9 +48,16 @@ int main(void)
     // Verificar as frequências no Debug
     RCC_ClocksTypeDef clocks;
     RCC_GetClocksFreq(&clocks);
+
     // Ativar os relógios periféricos
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOB, ENABLE);
+
     RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM3, ENABLE);
+    RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM4, ENABLE);
+
+    //***********************
+    // EXERCICIO 1
+    //***********************
 
     // Configurar PB0 como saída
     GPIO_InitTypeDef GPIO_InitStructure;
@@ -63,6 +71,26 @@ int main(void)
     // Estado inicial do PB0
     GPIO_ResetBits(GPIOB, GPIO_Pin_0);
 
+    //***********************
+	// EXERCICIO 2
+	//***********************
+
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_1;
+    GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP;
+
+    GPIO_Init(GPIOB, &GPIO_InitStructure);
+
+    //***********************
+	// EXERCICIO 3
+	//***********************
+
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_6;
+	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP;
+
+	GPIO_Init(GPIOB, &GPIO_InitStructure);
+
     // Configurar o TIM3
     TIM_TimeBaseInitTypeDef TIM_TimeBaseStructure;
 
@@ -73,12 +101,64 @@ int main(void)
 
     TIM_TimeBaseInit(TIM3, &TIM_TimeBaseStructure);
 
+    // Output Compare Toggle
+
+    TIM_OCInitTypeDef TIM_OCInitStructure;
+
+    TIM_OCStructInit(&TIM_OCInitStructure);
+
+    TIM_OCInitStructure.TIM_OCMode = TIM_OCMode_Toggle;
+    TIM_OCInitStructure.TIM_OutputState = TIM_OutputState_Enable;
+    TIM_OCInitStructure.TIM_Pulse = 18000;
+    TIM_OCInitStructure.TIM_OCPolarity = TIM_OCPolarity_High;
+
+    TIM_OC4Init(TIM3, &TIM_OCInitStructure);
+
+    // Configurar TIM4 para PWM
+
+    TIM_TimeBaseInitTypeDef TIM4_TimeBaseStructure;
+
+	// Frequencia do TIM4 = 72 MHz
+	// PWM = 72 MHz / (72 * 1000) = 1 kHz
+
+	TIM4_TimeBaseStructure.TIM_Period = 999;
+	TIM4_TimeBaseStructure.TIM_Prescaler = 71;
+	TIM4_TimeBaseStructure.TIM_ClockDivision = TIM_CKD_DIV1;
+	TIM4_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_Up;
+
+	TIM_TimeBaseInit(TIM4, &TIM4_TimeBaseStructure);
+
+	// PWM no canal 1 do TIM4
+
+	TIM_OCInitTypeDef TIM4_OCInitStructure;
+
+	TIM_OCStructInit(&TIM4_OCInitStructure);
+
+	TIM4_OCInitStructure.TIM_OCMode = TIM_OCMode_PWM1;
+	TIM4_OCInitStructure.TIM_OutputState = TIM_OutputState_Enable;
+
+	// Duty cycle de 5%
+	// Para testar 95%, alterar para 950
+	TIM4_OCInitStructure.TIM_Pulse = 950;
+
+	TIM4_OCInitStructure.TIM_OCPolarity = TIM_OCPolarity_High;
+
+	TIM_OC1Init(TIM4, &TIM4_OCInitStructure);
+
+	// Ativar preload
+	TIM_OC1PreloadConfig(TIM4, TIM_OCPreload_Enable);
+	TIM_ARRPreloadConfig(TIM4, ENABLE);
+
+    // Iniciar TIM3
+
     // Limpar a flag antes de iniciar
     TIM_ClearFlag(TIM3, TIM_FLAG_Update);
 
     // Iniciar o TIM3
     TIM_Cmd(TIM3, ENABLE);
+    TIM_Cmd(TIM4, ENABLE);
 
+    //Ciclo principal - ex 1
     while (1){
         // Verificar se ocorreu um update event
         if (TIM_GetFlagStatus(TIM3, TIM_FLAG_Update) != RESET){
@@ -91,3 +171,4 @@ int main(void)
         }
     }
 }
+
