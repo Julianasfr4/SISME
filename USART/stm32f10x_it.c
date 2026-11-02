@@ -464,15 +464,15 @@ void TIM2_IRQHandler(void)
 * Output         : None
 * Return         : None
 *******************************************************************************/
-extern volatile uint32_t toggle_count;
+//extern volatile uint32_t toggle_count;
 
 void TIM3_IRQHandler(void) {
     if (TIM_GetITStatus(TIM3, TIM_IT_Update) != RESET) {
         TIM_ClearITPendingBit(TIM3, TIM_IT_Update); // Limpar flag
 
-        GPIOB->ODR ^= GPIO_Pin_0;                   // Toggle do LED0
+        //GPIOB->ODR ^= GPIO_Pin_0;                   // Toggle do LED0
 
-        toggle_count++;                             // Incrementa contador
+        //toggle_count++;                             // Incrementa contador
     }
 }
 /*******************************************************************************

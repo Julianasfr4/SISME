@@ -245,6 +245,9 @@ int main(void) {
 	RCC_Config_HSE_PLL_Max();
 	GPIO_Configuration();
 
+	// Ativar o clock do AFIO, necessario para o remapeamento do PB4
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_AFIO, ENABLE);
+
 	// inicialização do display
 	lcd_init();
 	lcd_draw_fillrect(0, 0, LCD_WIDTH, LCD_HEIGHT, 0x0000); // começa apagado
