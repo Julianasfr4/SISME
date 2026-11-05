@@ -1,0 +1,123 @@
+# 🎤 SLIDE 1 — Introdução
+
+"Bom dia.
+
+O nosso projeto consiste num sistema de monitorização de vibrações, utilizando um STM32 e o acelerómetro ADXL337.
+
+O objetivo foi estudar o funcionamento do ADC e do DMA, aplicando-os na leitura de um sensor real.
+
+O acelerómetro mede acelerações nos três eixos: X, Y e Z.
+
+O STM32 recebe esses dados, processa-os e envia os resultados para o computador através da USART.
+
+Também utilizamos os valores obtidos para controlar uma animação no LCD."
+
+---
+
+# 🎤 SLIDE 2 — Acelerómetro ADXL337
+
+"O sensor que escolhemos foi o ADXL337, um acelerómetro de três eixos.
+
+Este sensor tem três saídas analógicas, uma para cada eixo.
+
+Como os sinais são analógicos, precisamos do ADC do STM32 para os converter em valores digitais.
+
+Ligámos o eixo X ao pino PC2, o Y ao PC1 e o Z ao PC0.
+
+O ADC tem uma resolução de 12 bits, pelo que os valores obtidos vão de 0 a 4095.
+
+Depois, utilizamos a sensibilidade indicada no datasheet para converter os valores numa estimativa da aceleração em mg."
+
+---
+
+# 🎤 SLIDE 3 — ADC e TIM3
+
+"Para fazer a leitura dos três eixos, configurámos o ADC no modo Scan.
+
+Isto permite converter os três canais automaticamente, um a seguir ao outro.
+
+Utilizámos também o temporizador TIM3 para controlar a frequência das leituras.
+
+O TIM3 foi configurado para 200 Hz, o que significa que inicia uma sequência de conversões a cada 5 milissegundos.
+
+Escolhemos esta solução para manter as leituras regulares, independentemente do que o programa estiver a fazer.
+
+Assim, mesmo quando estamos a atualizar o LCD, a aquisição continua a ser controlada pelo temporizador."
+
+---
+
+# 🎤 SLIDE 4 — DMA
+
+"Para guardar os valores do ADC na memória, utilizámos o DMA.
+
+O DMA permite transferir os dados automaticamente, sem que o processador tenha de copiar cada amostra.
+
+Configurámos o DMA em modo circular, para que continue a adquirir dados sem precisar de ser reiniciado.
+
+O nosso buffer tem duas metades, com 32 conjuntos de amostras em cada uma.
+
+Como temos 200 leituras por segundo, cada metade corresponde a 160 milissegundos.
+
+Enquanto uma metade recebe dados, o programa pode processar a outra.
+
+Desta forma, conseguimos adquirir dados e realizar os cálculos em paralelo."
+
+---
+
+# 🎤 SLIDE 5 — Processamento dos dados
+
+"Depois de recolher os dados, calculamos o RMS para determinar a intensidade da vibração.
+
+Primeiro retiramos a média de cada conjunto de amostras, para analisar principalmente as variações da aceleração.
+
+Depois calculamos o RMS dos três eixos e combinamos os resultados num valor total.
+
+Também convertemos os valores para mg, utilizando a sensibilidade nominal do acelerómetro.
+
+Durante os testes, verificámos que algumas leituras apresentavam picos isolados, principalmente quando o LCD era atualizado.
+
+Por isso, implementámos uma mediana móvel de cinco valores.
+
+Este filtro ajuda a reduzir o efeito desses picos e torna a animação mais estável.
+
+Enviamos os resultados originais e filtrados para o computador através da USART."
+
+---
+
+# 🎤 SLIDE 6 — Demonstração e conclusão
+
+"Para apresentar os resultados, criámos uma animação no LCD.
+
+Temos uma barra que representa a intensidade da vibração e um balão que cresce quando a vibração aumenta.
+
+Quando a vibração diminui, o balão encolhe lentamente.
+
+Também classificamos a vibração em três níveis: baixa, média e alta.
+
+Se a intensidade atingir o limite definido e forem cumpridas as condições programadas, o balão rebenta e depois reinicia automaticamente.
+
+Escolhemos esta representação porque queríamos desenvolver um sistema de monitorização, em vez de um jogo controlado pela inclinação da placa.
+
+Com este trabalho, conseguimos aplicar o ADC, o DMA e o TIM3, processar os dados de um sensor real e apresentar os resultados no computador e no LCD.
+
+Agora vamos mostrar o sistema a funcionar."
+
+---
+
+# 🎈 DEMONSTRAÇÃO PRÁTICA
+
+**Com a placa em repouso:**
+
+"Neste momento, os valores de vibração são baixos e o balão mantém-se pequeno."
+
+**Ao aplicar vibração:**
+
+"Quando aplicamos vibração, podemos observar o aumento dos valores RMS e o crescimento do balão."
+
+**Ao parar:**
+
+"Quando paramos, os valores diminuem e o balão começa a encolher."
+
+**Se o balão rebentar:**
+
+"Quando a vibração é suficientemente elevada, o balão rebenta e reinicia automaticamente."
