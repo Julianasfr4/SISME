@@ -6,7 +6,7 @@ A aquisição e o processamento não mudaram. Mudaram a interface no LCD, a lóg
 
 ## Como se joga
 
-1. Ao ligar, aparece o **menu**, numa página à parte: **ESCOLHE O NIVEL**, com três caixas (FACIL, NORMAL, DIFICIL). A caixa escolhida fica pintada com a sua cor.
+1. Ao ligar, aparece o **menu**, numa página à parte e o mais simples possível: o título e as três opções (FACIL, NORMAL, DIFICIL), uma por linha. A escolhida tem um `>` à frente e fica na cor do nível; as outras ficam a cinzento. Em baixo só diz **SEGURA 1s = JOGAR**.
 2. **Clique** no SW5 (largar antes de 1 s): passa para o nível seguinte.
 3. **Segurar** o SW5 durante 1 s: começa o desafio. O ecrã muda para a página do jogo e aparece a contagem **PREPARA... 3, 2, 1**.
 4. Aparece **VAI! ABANA!** e o cronómetro (**TEMPO: ss.d s**) começa a contar.

@@ -127,12 +127,9 @@
 #define BOTAO_SEGURAR_BLOCOS  6U  // 6 x 160 ms = ~1 s
 #define BOTAO_DEBOUNCE_BLOCOS 2U  // ignora ressaltos durante 320 ms
 
-// Menu: tres caixas, uma por nivel.
-#define MENU_CAIXA_X         14U
-#define MENU_CAIXA_Y0        44U
-#define MENU_CAIXA_PASSO     28U
-#define MENU_CAIXA_LARGURA  100U
-#define MENU_CAIXA_ALTURA    22U
+// Menu: uma linha de texto por nivel.
+#define MENU_LINHA_Y0        44U
+#define MENU_LINHA_PASSO     26U
 
 // Zonas de cor da barra (em pixeis): verde, amarelo, vermelho.
 #define BARRA_ZONA_AMARELA   40U
@@ -707,39 +704,22 @@ static void DesenhaCabecalho(void)
 // =====================================================
 // MENU INICIAL (pagina a parte)
 // =====================================================
-// Uma caixa por nivel. A escolhida fica preenchida com a sua cor e texto
-// preto; as outras ficam so com o contorno e o texto na cor do nivel.
+// Uma linha por nivel: o escolhido fica com "> " e a cor do nivel,
+// os outros a cinzento.
 static void DesenhaOpcoes(void)
 {
     for (uint8_t i = 0U; i < NUM_DIFICULDADES; i++)
     {
-        uint8_t y = (uint8_t)(MENU_CAIXA_Y0 + i * MENU_CAIXA_PASSO);
-        uint16_t cor = cor_dificuldade[i];
-        uint16_t cor_texto = cor;
-        const char *nome = nome_dificuldade[i];
-
-        if (i == dificuldade)
-        {
-            lcd_draw_fillrect(MENU_CAIXA_X, y, MENU_CAIXA_LARGURA,
-                              MENU_CAIXA_ALTURA, cor);
-            cor_texto = LCD_PRETO;
-        }
-        else
-        {
-            lcd_draw_fillrect(MENU_CAIXA_X, y, MENU_CAIXA_LARGURA,
-                              MENU_CAIXA_ALTURA, LCD_PRETO);
-            lcd_draw_fillrect(MENU_CAIXA_X, y, MENU_CAIXA_LARGURA, 1U, cor);
-            lcd_draw_fillrect(MENU_CAIXA_X, (uint8_t)(y + MENU_CAIXA_ALTURA - 1U),
-                              MENU_CAIXA_LARGURA, 1U, cor);
-            lcd_draw_fillrect(MENU_CAIXA_X, y, 1U, MENU_CAIXA_ALTURA, cor);
-            lcd_draw_fillrect((uint8_t)(MENU_CAIXA_X + MENU_CAIXA_LARGURA - 1U), y,
-                              1U, MENU_CAIXA_ALTURA, cor);
-        }
+        uint8_t y = (uint8_t)(MENU_LINHA_Y0 + i * MENU_LINHA_PASSO);
+        uint16_t cor = (i == dificuldade) ? cor_dificuldade[i] : LCD_CINZA;
 
         // Tamanho 2: cada caracter ocupa 12 px de largura e 16 px de altura.
-        lcd_draw_string((uint8_t)(64U - Comprimento(nome) * 6U),
-                        (uint8_t)(y + 3U), (unsigned char *)nome,
-                        cor_texto, 2U);
+        lcd_draw_fillrect(0U, y, 128U, 16U, LCD_PRETO);
+        if (i == dificuldade)
+        {
+            lcd_draw_string(16U, y, (unsigned char *)">", cor, 2U);
+        }
+        lcd_draw_string(34U, y, (unsigned char *)nome_dificuldade[i], cor, 2U);
     }
 }
 
@@ -747,12 +727,8 @@ static void DesenhaMenu(void)
 {
     lcd_draw_fillrect(0U, 0U, 128U, 160U, LCD_PRETO);
     DesenhaCabecalho();
-    lcd_draw_string(19U, 28U, (unsigned char *)"ESCOLHE O NIVEL",
-                    LCD_BRANCO, 1U);
     DesenhaOpcoes();
-    lcd_draw_string(25U, 134U, (unsigned char *)"CLIQUE: MUDAR",
-                    LCD_CINZA, 1U);
-    lcd_draw_string(16U, 146U, (unsigned char *)"SEGURA 1s: JOGAR",
+    lcd_draw_string(13U, 140U, (unsigned char *)"SEGURA 1s = JOGAR",
                     LCD_CINZA, 1U);
 }
 
