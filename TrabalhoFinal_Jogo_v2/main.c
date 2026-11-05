@@ -88,8 +88,7 @@
 #define NIVEL_ALTA_ENTRA_MG     260U
 #define NIVEL_ALTA_SAI_MG       230U
 
-// Rebenta apenas quando a MEDIANA ultrapassa 500 mg em 3 blocos seguidos.
-#define LIMIAR_REBENTAMENTO_MG  500U  // valor NORMAL; agora depende da dificuldade
+// Rebenta quando a MEDIANA passa o limiar do nivel em 3 blocos seguidos.
 #define REBENTAMENTO_BLOCOS       3U
 
 // Mostrar o rebentamento (ou o fim do tempo) durante 16 blocos (~2,6 s).
@@ -127,11 +126,10 @@
 #define BOTAO_SEGURAR_BLOCOS  6U  // 6 x 160 ms = ~1 s
 #define BOTAO_DEBOUNCE_BLOCOS 2U  // ignora ressaltos durante 320 ms
 
-// Menu: uma linha por nivel (texto em tamanho 2 = 16 px de altura).
-#define MENU_Y0              40U
-#define MENU_PASSO           28U
+// Menu: so o nivel escolhido (tamanho 2 = 16 px de altura) e o seu recorde.
+#define MENU_NIVEL_Y         64U
 #define MENU_REC_X           31U  // "REC: 05.4 s" = 11 caracteres x 6 px, centrado
-#define MENU_REC_Y          122U
+#define MENU_REC_Y           92U
 #define JOGO_REC_X           58U  // a direita do nome do nivel
 
 // Zonas de cor da barra (em pixeis): verde, amarelo, vermelho.
@@ -726,44 +724,29 @@ static void DesenhaCabecalho(void)
 // =====================================================
 // MENU INICIAL (pagina a parte)
 // =====================================================
-// Uma linha por nivel. O escolhido aparece na sua cor e com "> <";
-// os outros ficam a cinzento.
+// Mostra apenas o nivel escolhido, centrado e na sua cor, com o recorde
+// por baixo. Cada clique no SW5 passa para o nivel seguinte.
 static void DesenhaOpcoes(void)
 {
-    for (uint8_t i = 0U; i < NUM_DIFICULDADES; i++)
-    {
-        uint8_t y = (uint8_t)(MENU_Y0 + i * MENU_PASSO);
-        const char *nome = nome_dificuldade[i];
-        uint8_t n = Comprimento(nome);
+    const char *nome = nome_dificuldade[dificuldade];
 
-        // O texto em tamanho 2 nao apaga o fundo: limpar a linha primeiro.
-        lcd_draw_fillrect(0U, y, 128U, 16U, LCD_PRETO);
+    // O texto em tamanho 2 nao apaga o fundo: limpar a linha primeiro.
+    lcd_draw_fillrect(0U, MENU_NIVEL_Y, 128U, 16U, LCD_PRETO);
+    lcd_draw_string((uint8_t)(64U - Comprimento(nome) * 6U), MENU_NIVEL_Y,
+                    (unsigned char *)nome, cor_dificuldade[dificuldade], 2U);
 
-        if (i == dificuldade)
-        {
-            lcd_draw_string((uint8_t)(64U - n * 6U - 14U), y,
-                            (unsigned char *)">", cor_dificuldade[i], 2U);
-            lcd_draw_string((uint8_t)(64U - n * 6U), y,
-                            (unsigned char *)nome, cor_dificuldade[i], 2U);
-        }
-        else
-        {
-            lcd_draw_string((uint8_t)(64U - n * 6U), y,
-                            (unsigned char *)nome, LCD_CINZA, 2U);
-        }
-    }
-
-    // Recorde do nivel escolhido, centrado por cima da dica.
     MostraRecorde(MENU_REC_X, MENU_REC_Y);
 }
 
-// Pagina inicial: titulo, os tres niveis, o recorde e uma dica.
+// Pagina inicial: titulo, nivel escolhido, recorde e duas dicas.
 static void DesenhaMenu(void)
 {
     lcd_draw_fillrect(0U, 0U, 128U, 160U, LCD_PRETO);
     DesenhaCabecalho();
     DesenhaOpcoes();
-    lcd_draw_string(16U, 140U, (unsigned char *)"SEGURA SW5: JOGAR",
+    lcd_draw_string(25U, 128U, (unsigned char *)"CLIQUE: NIVEL",
+                    LCD_CINZA, 1U);
+    lcd_draw_string(25U, 142U, (unsigned char *)"SEGURA: JOGAR",
                     LCD_CINZA, 1U);
 }
 
