@@ -281,7 +281,8 @@ void lcd_delay_pool(uint16_t time2delay)
 {
 	volatile uint32_t dummy = 0;
 
-	for (dummy = time2delay*500; dummy > 0 ; dummy--);
+	// A 72 MHz, cada ms precisa de cerca de 7000 iterações neste ciclo
+	for (dummy = time2delay*7000; dummy > 0 ; dummy--);
 }
 
 
@@ -294,8 +295,8 @@ void lcd_init ( void )
 
 	if (lcd_initialized == 0)
 	{
-		/*RCC do GPIOB e GPIOD*/
-		RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA | RCC_APB2Periph_GPIOB , ENABLE);
+		/*RCC do GPIOA, GPIOB e AFIO (obrigatorio para libertar o PB4 do JTAG)*/
+		RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA | RCC_APB2Periph_GPIOB | RCC_APB2Periph_AFIO, ENABLE);
 
 		//Backlight
 		GPIO_WriteBit(GPIOA, GPIO_Pin_0, Bit_SET);
@@ -336,7 +337,7 @@ void lcd_init ( void )
 		GPIO_Init(GPIOA, &GPIO_InitStructure);
 		GPIO_WriteBit(GPIOA, GPIO_Pin_4, Bit_SET);  /*ativar o SS*/
 
-		GPIO_PinRemapConfig ( GPIO_Remap_SWJ_NoJTRST, ENABLE ) ;
+		GPIO_PinRemapConfig ( GPIO_Remap_SWJ_JTAGDisable, ENABLE ) ;
 		/*GPIOB4 RESET  Out Push-pull*/
 		GPIO_InitStructure.GPIO_Pin =  GPIO_Pin_4;
 		GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
@@ -344,7 +345,7 @@ void lcd_init ( void )
 		GPIO_Init(GPIOB, &GPIO_InitStructure);
 
 
-		/*RCC do SPI2*/
+		/*RCC do SPI1*/
 		RCC_APB2PeriphClockCmd(RCC_APB2Periph_SPI1, ENABLE);
 
 		SPI_InitStructure.SPI_Direction = SPI_Direction_2Lines_FullDuplex;
@@ -353,10 +354,13 @@ void lcd_init ( void )
 		SPI_InitStructure.SPI_CPOL = SPI_CPOL_High;
 		SPI_InitStructure.SPI_CPHA = SPI_CPHA_2Edge;
 		SPI_InitStructure.SPI_NSS = SPI_NSS_Soft;
-		SPI_InitStructure.SPI_BaudRatePrescaler = SPI_BaudRatePrescaler_8;
+		SPI_InitStructure.SPI_BaudRatePrescaler = SPI_BaudRatePrescaler_16; // A 72 MHz, Div16 = 4.5 MHz (igual aos 4 MHz com 8 MHz)
 		SPI_InitStructure.SPI_FirstBit = SPI_FirstBit_MSB;
-		SPI_InitStructure.SPI_CRCPolynomial = 7;  // Obrigatorio preencher no SPI_Init
+		SPI_InitStructure.SPI_CRCPolynomial = 7;
 		SPI_Init(SPI1, &SPI_InitStructure);
+
+		/* Ativar o SSI interno (obrigatorio no STM32 em Master mode com NSS_Soft para evitar Mode Fault MODF) */
+		SPI_NSSInternalSoftwareConfig(SPI1, SPI_NSSInternalSoft_Set);
 
 		SPI_Cmd(SPI1, ENABLE);
 
@@ -851,5 +855,6 @@ void rcc_lcd_info(void)
     strcat(buffer_lcd, "\r\n"); prvSendMessageUSART2(buffer_lcd);
 
 }
+
 
 
