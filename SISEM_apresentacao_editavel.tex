@@ -1,0 +1,219 @@
+\documentclass[aspectratio=169,10pt]{beamer}
+\usetheme{Madrid}
+\usecolortheme{dolphin}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[portuguese]{babel}
+\usepackage{lmodern}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning}
+\usepackage{listings}
+\definecolor{azul}{RGB}{18,78,133}
+\definecolor{verde}{RGB}{26,128,91}
+\setbeamercolor{structure}{fg=azul}
+\setbeamercolor{frametitle}{bg=azul,fg=white}
+\setbeamercolor{block title}{bg=azul,fg=white}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{footline}[frame number]
+\setbeamersize{text margin left=8mm,text margin right=8mm}
+\lstset{language=C,basicstyle=\ttfamily\scriptsize,keywordstyle=\color{azul}\bfseries,showstringspaces=false,columns=fullflexible,keepspaces=true,frame=single,framerule=0.3pt,xleftmargin=3pt,xrightmargin=3pt}
+\newcommand{\etiqueta}[1]{{\color{azul}\bfseries #1}}
+\begin{document}
+
+% SLIDE 1
+\begin{frame}{Sistema de aquisicao e monitorizacao de vibracoes}
+\begin{columns}[T,onlytextwidth]
+\column{0.40\textwidth}
+{\Large\bfseries Trabalho Final --- SISEM}\\[3mm]
+\etiqueta{Objetivo}\\
+Medir e processar a intensidade de vibracoes nos eixos X, Y e Z.\\[4mm]
+\etiqueta{Hardware}\\
+STM32F103RBT6\\
+Acelerometro ADXL337\\
+LCD integrado\\[4mm]
+\textbf{Grupo:} [Nomes dos alunos]
+\column{0.60\textwidth}
+\centering
+\begin{tikzpicture}[>=Stealth, every node/.style={font=\scriptsize},box/.style={draw=azul,rounded corners=2pt,fill=blue!5,align=center,minimum width=21mm,minimum height=8mm}]
+\node[box] (sensor) at (0,2.45) {ADXL337\\X, Y, Z};
+\node[box] (adc) at (0,1.35) {ADC1 + TIM3};
+\node[box] (dma) at (0,0.25) {DMA1 + RAM};
+\node[box] (rms) at (0,-0.85) {RMS + Med5};
+\node[box] (uart) at (-1.8,-2.1) {USART2\\Computador};
+\node[box] (lcd) at (1.8,-2.1) {SPI1 + LCD\\Barra / balao};
+\draw[->,thick] (sensor)--(adc);
+\draw[->,thick] (adc)--(dma);
+\draw[->,thick] (dma)--(rms);
+\draw[->,thick] (rms)--(uart);
+\draw[->,thick] (rms)--(lcd);
+\end{tikzpicture}
+\end{columns}
+\end{frame}
+
+% SLIDE 2
+\begin{frame}{ADXL337: sensor e ligacoes ao ADC}
+\begin{columns}[T,onlytextwidth]
+\column{0.52\textwidth}
+\begin{block}{Caracteristicas essenciais}
+\begin{itemize}\setlength\itemsep{2pt}
+\item Acelerometro \textbf{MEMS de 3 eixos}.
+\item Saidas \textbf{analogicas} XOUT, YOUT e ZOUT.
+\item Gama de medicao de pelo menos $\pm3\,g$.
+\item Sensibilidade tipica: \textbf{300 mV/g a 3,0 V}.
+\item Para 3,3 V: estimativa nominal de \textbf{330 mV/g}.
+\end{itemize}
+\end{block}
+\column{0.45\textwidth}
+\begin{block}{Ligacoes utilizadas}
+\centering\begin{tabular}{lll}
+\toprule
+Eixo & Pino & Canal ADC1\\\midrule
+X & PC2 & IN12\\
+Y & PC1 & IN11\\
+Z & PC0 & IN10\\\bottomrule
+\end{tabular}
+\end{block}
+\vspace{2mm}
+\centering
+\fbox{\parbox{0.90\linewidth}{\centering \textbf{ADC com 12 bits}\\[1mm]
+$0\ \ldots\ 4095$\\[1mm]
+\scriptsize Digitaliza a tensao de cada saida}}
+\end{columns}
+\vfill
+{\footnotesize\color{gray}Fonte tecnica: datasheet ADXL337 (Analog Devices). A conversao em mg e nominal, nao uma calibracao de precisao.}
+\end{frame}
+
+% SLIDE 3
+\begin{frame}[fragile]{ADC1 + TIM3: aquisicao periodica}
+\begin{columns}[T,onlytextwidth]
+\column{0.50\textwidth}
+\etiqueta{Decisoes de configuracao}
+\begin{itemize}\setlength\itemsep{3pt}
+\item \textbf{Scan}: 3 canais na ordem X $\to$ Y $\to$ Z.
+\item \textbf{Continuous = DISABLE}: cada sequencia comeca por disparo externo.
+\item \textbf{TIM3 TRGO}: frequencia regular, independente da interface grafica.
+\item Clock ADC = \textbf{12 MHz}.
+\end{itemize}
+\vspace{2mm}
+\[f_s=\frac{72\,000\,000}{(7199+1)(49+1)}=\boxed{200\ \mathrm{Hz}}\]
+\centering\small Uma sequencia de 3 conversoes a cada \textbf{5 ms}.
+\column{0.48\textwidth}
+\etiqueta{Exemplo de configuracao SPL}
+\begin{lstlisting}
+ADC_InitStructure.ADC_ScanConvMode
+    = ENABLE;
+ADC_InitStructure.ADC_ContinuousConvMode
+    = DISABLE;
+ADC_InitStructure.ADC_ExternalTrigConv
+    = ADC_ExternalTrigConv_T3_TRGO;
+ADC_InitStructure.ADC_NbrOfChannel = 3;
+ADC_Init(ADC1, &ADC_InitStructure);
+\end{lstlisting}
+\vspace{3mm}
+\centering
+\begin{tikzpicture}[>=Stealth,font=\scriptsize]
+\draw[->] (0,0)--(5.0,0) node[right]{tempo};
+\draw[azul,thick] (.5,-.2)--(.5,.4);\node[above] at (.5,.4) {X Y Z};
+\draw[azul,thick] (2.5,-.2)--(2.5,.4);\node[above] at (2.5,.4) {X Y Z};
+\draw[azul,thick] (4.5,-.2)--(4.5,.4);\node[above] at (4.5,.4) {X Y Z};
+\draw[<->] (.5,-.45)--(2.5,-.45) node[midway,below]{5 ms};
+\end{tikzpicture}
+\end{columns}
+\end{frame}
+
+% SLIDE 4
+\begin{frame}[fragile]{DMA circular: adquirir sem bloquear a CPU}
+\begin{columns}[T,onlytextwidth]
+\column{0.53\textwidth}
+\begin{block}{Como funciona}
+\begin{itemize}\setlength\itemsep{2pt}
+\item DMA1, \textbf{canal 1}: $\mathrm{ADC1\!\to RAM}$.
+\item Transferencias de \textbf{16 bits}; endereco RAM incrementado.
+\item Buffer \textbf{circular} com duas metades.
+\item Flags \textbf{HT / TC}: sinalizam uma metade concluida.
+\item Copia local da metade antes do calculo RMS.
+\end{itemize}
+\end{block}
+\begin{lstlisting}
+volatile uint16_t adc_buffer[2][32][3];
+DMA_InitStructure.DMA_Mode =
+    DMA_Mode_Circular;
+DMA_Init(DMA1_Channel1, &DMA_InitStructure);
+\end{lstlisting}
+\column{0.44\textwidth}
+\centering\etiqueta{Organizacao do buffer}\\[3mm]
+\begin{tikzpicture}[font=\small]
+\draw[thick,azul,fill=blue!8] (0,0) rectangle (4,1);
+\draw[thick,azul,fill=green!10] (0,-1) rectangle (4,0);
+\node at (2,.5) {Metade 0: 32 $\times$ 3};
+\node at (2,-.5) {Metade 1: 32 $\times$ 3};
+\draw[->,thick,azul] (4.15,.5) arc[start angle=80,end angle=-80,radius=.9];
+\end{tikzpicture}
+\vspace{5mm}
+\[T_{\text{bloco}}=\frac{32}{200}=\boxed{160\ \mathrm{ms}}\]
+\small Uma metade e processada enquanto a aquisicao continua.
+\end{columns}
+\end{frame}
+
+% SLIDE 5
+\begin{frame}{Processamento: RMS, mg e mediana de 5 blocos}
+\begin{columns}[T,onlytextwidth]
+\column{0.53\textwidth}
+\etiqueta{RMS da componente variavel}\\[-1mm]
+\[RMS_X=\sqrt{\frac{1}{32}\sum_{i=1}^{32}(x_i-\bar x)^2}\]
+\[RMS_{\mathrm{total}}=\sqrt{RMS_X^2+RMS_Y^2+RMS_Z^2}\]
+\small
+Subtrair $\bar x$ remove a componente constante de cada janela (incluindo parte do efeito da gravidade).\\[2mm]
+\etiqueta{Conversao nominal}\\
+\[1g\approx409{,}5\ \text{contagens ADC}\]
+\column{0.44\textwidth}
+\begin{block}{Por que usamos a Med5?}
+\begin{itemize}\setlength\itemsep{3pt}
+\item Guardamos os ultimos \textbf{5 RMS totais}.
+\item Ordenamos e escolhemos o \textbf{valor central}.
+\item Atenua picos e quedas \textbf{isolados}.
+\item Controla a animacao sem alterar o RMS original.
+\end{itemize}
+\end{block}
+\vspace{1mm}
+\small\textbf{Exemplo:} $20,22,85,21,19$ mg\\
+Mediana: \textbf{21 mg}; media: 33,4 mg.\\[3mm]
+\textbf{USART2 (9600 bps):} X, Y, Z, Total e Med5.
+\end{columns}
+\vfill
+{\scriptsize\color{gray}A Med5 nao elimina a causa da interferencia do LCD nem recupera informacao perdida por aliasing.}
+\end{frame}
+
+% SLIDE 6
+\begin{frame}{Demonstracao no LCD e conclusoes}
+\begin{columns}[T,onlytextwidth]
+\column{0.52\textwidth}
+\etiqueta{Aplicacao de monitorizacao}
+\begin{itemize}\setlength\itemsep{3pt}
+\item Barra e balao crescem com a intensidade filtrada.
+\item Em repouso, zona morta de \textbf{35 mg}.
+\item Niveis \textbf{BAIXA / MEDIA / ALTA} com histerese.
+\item Rebentamento associado a \textbf{Med5 $\geq$ 500 mg}, com confirmacao; reinicio automatico.
+\item Desenho incremental e atualizacoes espacadas para reduzir atividade SPI.
+\end{itemize}
+\column{0.45\textwidth}
+\centering\etiqueta{Esquema da interface}\\[3mm]
+\begin{tikzpicture}[scale=.82]
+\draw[azul,very thick,rounded corners=4pt,fill=black!3] (0,0) rectangle (4.8,4.6);
+\node[font=\small\bfseries] at (2.4,4.12) {SISEM VIBRACAO};
+\node[font=\small,text=verde] at (2.4,3.55) {VIB: MEDIA};
+\draw[fill=green!10] (.65,2.85) rectangle (4.15,3.14);
+\fill[verde] (.65,2.85) rectangle (2.8,3.14);
+\draw[fill=red!75,draw=red!75] (2.4,1.55) circle (.70);
+\draw[gray,thick] (2.4,.85)--(2.4,.25);
+\end{tikzpicture}
+\end{columns}
+\vfill
+\begin{block}{Conclusao}
+Implementamos a cadeia completa: \textbf{sensor $\to$ ADC + TIM3 $\to$ DMA $\to$ RMS/Med5 $\to$ USART + LCD}. A interface e demonstrativa; os limites em mg nao sao limiares de seguranca calibrados.
+\end{block}
+\end{frame}
+
+\end{document}
