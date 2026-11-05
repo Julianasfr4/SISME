@@ -13,17 +13,18 @@
  *   Z -> PC0 -> ADC1_IN10
  *
  * Funcionamento do Jogo:
- *   1) Ecrã inicial (menu): escolher FÁCIL, NORMAL ou DIFÍCIL.
- *      SW5: clique muda o nível; segurar 1 s começa o desafio.
- *   2) Contagem 3, 2, 1 e depois "VAI! ABANA!": o cronómetro começa.
- *   3) Objetivo: rebentar o balão no menor tempo possível (máx. 20 s).
- *   4) No fim (POP ou tempo esgotado) volta ao menu.
+ *   1) Placa parada: o LCD mostra "ABANA P/ JOGAR" e a leitura do sensor em direto.
+ *   2) Ao abanar (Med5 >= 120 mg) ou ao carregar no botão SW5, o jogo arranca diretamente!
+ *   3) O objetivo é rebentar o balão (500 mg) no menor tempo possível (máx. 20 s).
+ *   4) Quando rebenta, dá-se a explosão "POP!", o LED PB1 acende e o recorde fica guardado em RAM.
+ *   5) Após ~2.6 s, volta automaticamente ao ecrã pronto para jogar novamente.
  *
- * Extras implementados:
- *   - SW5 (PA1, EXTI1): navega no menu (FÁCIL/NORMAL/DIFÍCIL = 300/500/700 mg).
- *   - Terminal (USART2 RX): 'h' ajuda, '1'/'2'/'3' nível, 'j' jogar, 'r' apaga recordes.
- *   - LED PB0 (TIM3_CH3 em PWM): brilho proporcional ao enchimento da barra.
- *   - LED PB1: acende quando o balão rebenta.
+ * Periféricos e Extras implementados:
+ *   - ADC1 + DMA1 em modo circular com interrupções HT e TC via NVIC.
+ *   - TIM3 a 200 Hz: trigger TRGO para o ADC e PWM no LED PB0 (Canal 3).
+ *   - EXTI1: botão SW5 (PA1) com interrupção externa.
+ *   - USART2: comunicação série assíncrona a 9600 bps com receção por interrupção (RXNE).
+ *   - SPI1: LCD ST7735 com valores em tempo real (mg e g), barra gráfica e balão dinâmico.
  */
 
 #include "stm32f10x.h"
@@ -59,6 +60,7 @@
 // Limiares de vibração em mg
 #define NIVEL_MEDIA_ENTRA_MG    120U
 #define NIVEL_MEDIA_SAI_MG       95U
+#define REARME_AUTOMATICO_MG     95U // rearme ao pousar a placa
 #define NIVEL_ALTA_ENTRA_MG     260U
 #define NIVEL_ALTA_SAI_MG       230U
 
@@ -90,16 +92,15 @@
 #endif
 
 // Estados do jogo
-#define JOGO_MENU     0U // ecrã inicial: escolher o nível
-#define JOGO_ATIVO    1U // cronómetro a contar
-#define JOGO_REBOU    2U // balão rebentou (mostra o tempo)
+#define JOGO_ESPERA   0U // parado à espera: "ABANA P/ JOGAR"
+#define JOGO_ATIVO    1U // a jogar: cronómetro a contar
+#define JOGO_REBOU    2U // balão rebentou (mostra POP!)
 #define JOGO_FIM      3U // tempo esgotado (20 segundos)
-#define JOGO_CONTAGEM 4U // contagem 3, 2, 1 antes de começar
 
 #define JOGO_LIMITE_BLOCOS  125U // 125 * 160 ms = 20 s
 #define JOGO_MS_POR_BLOCO   160U // 32 amostras / 200 Hz = 160 ms
-#define CONTAGEM_BLOCOS      18U // 3 x 6 blocos = ~3 s
-#define CONTAGEM_PASSO        6U // ~1 s por número
+#define JOGO_INICIO_MG      120U // vibração mínima para arrancar o jogo (120 mg)
+#define LIMIAR_REBENTAMENTO_MG 500U // limiar fixo de 500 mg para rebentar
 
 // Parâmetros do botão SW5
 #define BOTAO_SEGURAR_BLOCOS  6U // 6 x 160 ms = ~1 s para começar o jogo
@@ -369,23 +370,11 @@ static uint8_t barra_desenhada_px = 0U;
 static uint8_t balao_raio_desenhado = 0U;
 static uint8_t contador_rebentamento = 0U;
 static uint8_t blocos_rebou = 0U;
-static uint8_t blocos_contagem = 0U;
 
-static uint8_t estado_jogo = JOGO_MENU;
+static uint8_t estado_jogo = JOGO_ESPERA;
 static uint32_t tempo_jogo_blocos = 0U;
-
-// Níveis de dificuldade: Fácil, Normal, Difícil
-#define DIF_FACIL    0U
-#define DIF_NORMAL   1U
-#define DIF_DIFICIL  2U
-#define NUM_DIFICULDADES 3U
-static const uint32_t limiar_dificuldade_mg[NUM_DIFICULDADES] = {300U, 500U, 700U};
-static const char *nome_dificuldade[NUM_DIFICULDADES]         = {"FACIL", "NORMAL", "DIFICIL"};
-static const uint16_t cor_dificuldade[NUM_DIFICULDADES]       = {LCD_VERDE, LCD_AMARELO, LCD_VERMELHO};
-static uint8_t dificuldade = DIF_NORMAL;
-#define LIMIAR_ATUAL_MG  (limiar_dificuldade_mg[dificuldade])
-
-static uint32_t recorde_blocos[NUM_DIFICULDADES] = {0U, 0U, 0U}; // recordes por nível
+static uint32_t recorde_blocos = 0U; // melhor tempo em blocos (0 = nenhum)
+static uint8_t pode_rebentar = 1U;
 
 // Flags das interrupções
 volatile uint8_t botao_pressionado = 0U; // botão SW5 (EXTI1)
@@ -429,18 +418,15 @@ static uint8_t Comprimento(const char *texto) {
     return n;
 }
 
-// Mostrar dificuldade no ecrã
-static void MostraDificuldade(void) {
-    lcd_draw_string(10U, JOGO_INFO_Y, (unsigned char *)nome_dificuldade[dificuldade], cor_dificuldade[dificuldade], 1U);
-}
-
-// Mostrar recorde no ecrã
-static void MostraRecorde(uint8_t x, uint8_t y) {
+// Mostrar limiar e recorde no ecrã
+static void MostraRecorde(void) {
 
     char texto[20];
-    uint32_t decimas = (recorde_blocos[dificuldade] * JOGO_MS_POR_BLOCO) / 100U;
+    uint32_t decimas = (recorde_blocos * JOGO_MS_POR_BLOCO) / 100U;
 
-    if (recorde_blocos[dificuldade] == 0U) {
+    lcd_draw_string(10U, JOGO_INFO_Y, (unsigned char *)"LIM: 500mg", LCD_CINZA, 1U);
+
+    if (recorde_blocos == 0U) {
         snprintf(texto, sizeof(texto), "REC: --.- s");
     }
     else {
@@ -448,42 +434,15 @@ static void MostraRecorde(uint8_t x, uint8_t y) {
                  (unsigned long)(decimas / 10U),
                  (unsigned long)(decimas % 10U));
     }
-    lcd_draw_string(x, y, (unsigned char *)texto, LCD_CIANO, 1U);
+    lcd_draw_string(62U, JOGO_INFO_Y, (unsigned char *)texto, LCD_CIANO, 1U);
 }
 
 // Desenhar cabeçalho comum a todas as páginas
 static void DesenhaCabecalho(void) {
     lcd_draw_string(16U, 6U, (unsigned char *)"DESAFIO DO BALAO", LCD_AMARELO, 1U);
-    lcd_draw_fillrect(10U, 16U, 108U, 1U, LCD_LARANJA);
+    lcd_draw_fillrect(10U, 15U, 108U, 1U, LCD_LARANJA);
 }
 
-// Desenhar as opções no menu
-static void DesenhaOpcoes(void) {
-
-    for (uint8_t i = 0U; i < NUM_DIFICULDADES; i++) {
-        uint8_t y = (uint8_t)(MENU_Y0 + i * MENU_PASSO);
-        const char *nome = nome_dificuldade[i];
-        uint8_t n = Comprimento(nome);
-
-        lcd_draw_fillrect(0U, y, 128U, 16U, LCD_PRETO); // limpa linha
-
-        if (i == dificuldade) {
-            lcd_draw_string((uint8_t)(64U - n * 6U - 14U), y, (unsigned char *)">", LCD_BRANCO, 2U);
-        }
-        lcd_draw_string((uint8_t)(64U - n * 6U), y, (unsigned char *)nome, LCD_BRANCO, 2U);
-    }
-
-    MostraRecorde(MENU_REC_X, MENU_REC_Y); // mostra o recorde do nível selecionado
-}
-
-// Desenhar página inicial do menu
-static void DesenhaMenu(void) {
-
-    lcd_draw_fillrect(0U, 0U, 128U, 160U, LCD_PRETO);
-    DesenhaCabecalho();
-    DesenhaOpcoes();
-    lcd_draw_string(16U, MENU_RODAPE_Y, (unsigned char *)"SEGURA SW5: JOGAR", LCD_CINZA, 1U);
-}
 // Cor da aceleração de acordo com o nível
 static uint16_t CorPorVibracao(uint32_t valor_mg) {
 
@@ -509,24 +468,6 @@ static void MostraValorJogo(uint32_t valor_mg) {
     n = Comprimento(texto);
     lcd_draw_fillrect(2U, (uint8_t)(JOGO_VALOR_Y - 1U), 124U, 10U, LCD_PRETO); // limpa a linha
     lcd_draw_string((uint8_t)((128U - n * 6U) / 2U), JOGO_VALOR_Y, (unsigned char *)texto, cor, 1U); // centra o texto
-}
-
-// Mostrar valor do sensor no menu inicial
-static void MostraValorMenu(uint32_t valor_mg) {
-
-    char texto[32];
-    uint8_t n;
-    uint32_t int_g = valor_mg / 1000U;
-    uint32_t dec_g = (valor_mg % 1000U) / 10U; // centésimas de g
-
-    snprintf(texto, sizeof(texto), "SENS: %lu mg (%lu.%02lu g)",
-             (unsigned long)valor_mg,
-             (unsigned long)int_g,
-             (unsigned long)dec_g);
-
-    n = Comprimento(texto);
-    lcd_draw_fillrect(2U, (uint8_t)(MENU_VALOR_Y - 1U), 124U, 10U, LCD_PRETO); // limpa a linha
-    lcd_draw_string((uint8_t)((128U - n * 6U) / 2U), MENU_VALOR_Y, (unsigned char *)texto, LCD_CIANO, 1U); // centra o texto
 }
 
 // Mostrar nível de vibração no ecrã
@@ -584,12 +525,12 @@ static uint8_t AtualizaNivel(uint32_t mediana_mg) {
 static uint8_t AlvoBarra(uint32_t mediana_mg) {
 
     if (mediana_mg <= BARRA_RUIDO_REPOUSO_MG) return 0U;
-    if (mediana_mg >= LIMIAR_ATUAL_MG)        return BARRA_LARGURA;
+    if (mediana_mg >= LIMIAR_REBENTAMENTO_MG)        return BARRA_LARGURA;
 
     return (uint8_t)(
         ((mediana_mg - BARRA_RUIDO_REPOUSO_MG) * BARRA_LARGURA +
-         (LIMIAR_ATUAL_MG - BARRA_RUIDO_REPOUSO_MG) / 2U) /
-        (LIMIAR_ATUAL_MG - BARRA_RUIDO_REPOUSO_MG));
+         (LIMIAR_REBENTAMENTO_MG - BARRA_RUIDO_REPOUSO_MG) / 2U) /
+        (LIMIAR_REBENTAMENTO_MG - BARRA_RUIDO_REPOUSO_MG));
 }
 
 // Converter largura da barra em raio do balão
@@ -804,14 +745,15 @@ static void Botao_EXTI_Config(void) {
     EXTI_Init(&EXTI_InitStructure);
 }
 
-// Desenhar o ecrã do jogo
+// Desenhar o ecrã do jogo (ecrã único)
 static void DesenhaEcraJogo(void) {
 
     lcd_draw_fillrect(0U, 0U, 128U, 160U, LCD_PRETO);
     DesenhaCabecalho();
     MostraCronometro();
-    MostraDificuldade();
-    MostraRecorde(JOGO_REC_X, JOGO_INFO_Y);
+    MostraEstado("ABANA P/ JOGAR", LCD_AMARELO);
+    MostraValorJogo(0U);
+    MostraRecorde();
 
     // Moldura da barra
     lcd_draw_fillrect(10U, 70U, 108U, 1U, LCD_BRANCO);
@@ -819,16 +761,13 @@ static void DesenhaEcraJogo(void) {
     lcd_draw_fillrect(10U, 71U, 1U, 12U, LCD_BRANCO);
     lcd_draw_fillrect(117U, 71U, 1U, 12U, LCD_BRANCO);
 
-    BalaoInicial(); // desenha o balão
+    BalaoInicial(); // desenha o balão inicial
 }
 
-// Iniciar o jogo e a contagem 3, 2, 1
+// Iniciar o jogo
 static void IniciaJogo(void) {
 
-    char mensagem[48];
-
-    estado_jogo = JOGO_CONTAGEM;
-    blocos_contagem = 0U;
+    estado_jogo = JOGO_ATIVO;
     tempo_jogo_blocos = 0U;
     contador_rebentamento = 0U;
     nivel_vibracao = VIB_BAIXA;
@@ -838,33 +777,27 @@ static void IniciaJogo(void) {
     AtualizaLED(0U);
     AtualizaPWM(0U);
 
-    DesenhaEcraJogo();
-    MostraEstado("PREPARA... 3", LCD_BRANCO);
-    MostraValorJogo(0U); // inicia a 0 mg
-
-    snprintf(mensagem, sizeof(mensagem), "Jogo %s (%lu mg): 3, 2, 1...\r\n",
-             nome_dificuldade[dificuldade],
-             (unsigned long)LIMIAR_ATUAL_MG);
-    USART2_EnviaTexto(mensagem);
+    MostraCronometro();
+    MostraEstado("VAI! ABANA!", LCD_LARANJA);
+    USART2_EnviaTexto("Inicio do jogo: VAI! ABANA!\r\n");
 }
 
 // Máquina de estados do jogo
 static uint8_t AtualizaJogo(uint32_t rms_mediana_mg) {
 
-    switch (estado_jogo) {
-    case JOGO_MENU:
-        return 0U;
+    if ((pode_rebentar == 0U) && (rms_mediana_mg <= REARME_AUTOMATICO_MG)) {
+        pode_rebentar = 1U;
+    }
 
-    case JOGO_CONTAGEM:
-        blocos_contagem++;
-        if (blocos_contagem >= CONTAGEM_BLOCOS) {
-            estado_jogo = JOGO_ATIVO;
-            MostraEstado("VAI! ABANA!", LCD_LARANJA);
+    switch (estado_jogo) {
+    case JOGO_ESPERA:
+        // Começa ao abanar com força (>= 120 mg) ou se carregar no botão SW5
+        if (((pode_rebentar != 0U) && (rms_mediana_mg >= JOGO_INICIO_MG)) ||
+            (botao_pressionado != 0U))
+        {
+            botao_pressionado = 0U;
+            IniciaJogo();
             return 3U; // início
-        }
-        if ((blocos_contagem % CONTAGEM_PASSO) == 0U) {
-            MostraEstado((blocos_contagem < 2U * CONTAGEM_PASSO) ?
-                         "PREPARA... 2" : "PREPARA... 1", LCD_BRANCO);
         }
         return 0U;
 
@@ -875,12 +808,14 @@ static uint8_t AtualizaJogo(uint32_t rms_mediana_mg) {
         if (tempo_jogo_blocos >= JOGO_LIMITE_BLOCOS) {
             estado_jogo = JOGO_FIM;
             blocos_rebou = 0U;
+            pode_rebentar = 0U;
             AtualizaPWM(0U);
             MostraEstado("TEMPO ESGOTADO", LCD_VERMELHO);
+            USART2_EnviaTexto("Fim do jogo: Tempo esgotado (20 s)!\r\n");
             return 4U; // tempo esgotado
         }
 
-        if (rms_mediana_mg >= LIMIAR_ATUAL_MG) {
+        if (rms_mediana_mg >= LIMIAR_REBENTAMENTO_MG) {
             if (contador_rebentamento < REBENTAMENTO_BLOCOS) {
                 contador_rebentamento++;
             }
@@ -894,8 +829,10 @@ static uint8_t AtualizaJogo(uint32_t rms_mediana_mg) {
             (barra_desenhada_px == BARRA_LARGURA) &&
             (balao_raio_desenhado == BALAO_RAIO_MAX))
         {
+            char msg[48];
             estado_jogo = JOGO_REBOU;
             blocos_rebou = 0U;
+            pode_rebentar = 0U;
             contador_rebentamento = 0U;
             AtualizaLED(1U); // acende LED PB1
 
@@ -908,29 +845,40 @@ static uint8_t AtualizaJogo(uint32_t rms_mediana_mg) {
             AtualizaPWM(0U);
             DesenhaExplosao();
 
-            if ((recorde_blocos[dificuldade] == 0U) ||
-                (tempo_jogo_blocos < recorde_blocos[dificuldade]))
-            {
-                recorde_blocos[dificuldade] = tempo_jogo_blocos;
+            if ((recorde_blocos == 0U) || (tempo_jogo_blocos < recorde_blocos)) {
+                recorde_blocos = tempo_jogo_blocos;
                 MostraEstado("NOVO RECORDE!", LCD_CIANO);
-                MostraRecorde(JOGO_REC_X, JOGO_INFO_Y);
+                MostraRecorde();
+                snprintf(msg, sizeof(msg), "NOVO RECORDE: %02lu.%lu s!\r\n",
+                         (unsigned long)((tempo_jogo_blocos * JOGO_MS_POR_BLOCO) / 1000U),
+                         (unsigned long)(((tempo_jogo_blocos * JOGO_MS_POR_BLOCO) % 1000U) / 100U));
             }
             else {
                 MostraEstado("REBOU!", LCD_VERMELHO);
+                snprintf(msg, sizeof(msg), "Rebentou em %02lu.%lu s!\r\n",
+                         (unsigned long)((tempo_jogo_blocos * JOGO_MS_POR_BLOCO) / 1000U),
+                         (unsigned long)(((tempo_jogo_blocos * JOGO_MS_POR_BLOCO) % 1000U) / 100U));
             }
+            USART2_EnviaTexto(msg);
             return 1U; // rebentou
         }
         return 0U;
 
-    default:
+    default: // JOGO_REBOU ou JOGO_FIM
         blocos_rebou++;
         if (blocos_rebou >= REBOU_DURACAO_BLOCOS) {
-            estado_jogo = JOGO_MENU;
+            estado_jogo = JOGO_ESPERA;
             blocos_rebou = 0U;
+            tempo_jogo_blocos = 0U;
             AtualizaLED(0U); // apaga LED PB1
             AtualizaPWM(0U);
-            DesenhaMenu(); // volta ao menu
-            return 2U;
+
+            // Limpa zona da explosão e redesenha balão inicial
+            lcd_draw_fillrect(0U, 90U, 128U, 70U, LCD_PRETO);
+            BalaoInicial();
+            MostraCronometro();
+            MostraEstado("ABANA P/ JOGAR", LCD_AMARELO);
+            return 2U; // voltou à espera
         }
         return 0U;
     }
@@ -1069,8 +1017,8 @@ void MostraBloco(uint8_t metade, uint32_t numero) {
     if (evento == 0U) {
         mudou_nivel    = AtualizaNivel(rms_mediana_mg);
         mudou_animacao = AtualizaAnimacao(rms_mediana_mg, numero);
-        if ((estado_jogo == JOGO_MENU) && ((numero % 2U) == 0U)) {
-            MostraValorMenu(rms_mediana_mg); // leitura contínua no menu
+        if ((estado_jogo == JOGO_ESPERA) && ((numero % 2U) == 0U)) {
+            MostraValorJogo(rms_mediana_mg); // leitura contínua em espera
         }
     }
     desenhou_lcd = (uint8_t)(mudou_nivel || mudou_animacao);
@@ -1111,76 +1059,13 @@ void MostraBloco(uint8_t metade, uint32_t numero) {
         ultimo_aviso_dma = blocos_dma_descartados;
     }
 
-    if (evento == 1U) {
+        if (evento == 1U) {
         uint32_t t = (tempo_jogo_blocos * JOGO_MS_POR_BLOCO) / 100U;
-        uint32_t r = (recorde_blocos[dificuldade] * JOGO_MS_POR_BLOCO) / 100U;
-        snprintf(mensagem, sizeof(mensagem),
-                 ">>> REBENTOU em %lu.%lu s | Recorde %s: %lu.%lu s\r\n",
+        uint32_t r = (recorde_blocos * JOGO_MS_POR_BLOCO) / 100U;
+        snprintf(mensagem, sizeof(mensagem), ">>> REBENTOU em %lu.%lu s | Recorde: %lu.%lu s\r\n",
                  (unsigned long)(t / 10U), (unsigned long)(t % 10U),
-                 nome_dificuldade[dificuldade],
                  (unsigned long)(r / 10U), (unsigned long)(r % 10U));
         USART2_EnviaTexto(mensagem);
-    }
-}
-
-// Menu de ajuda no terminal
-static void MostraAjuda(void) {
-    USART2_EnviaTexto("Comandos (no menu): h ajuda | 1 facil | 2 normal | 3 dificil | j jogar | r apaga recordes\r\n");
-    USART2_EnviaTexto("Botao SW5 no menu: clique muda o nivel, segurar 1 s comeca\r\n");
-}
-
-// Alterar a dificuldade
-static void MudaDificuldade(uint8_t nova) {
-
-    char mensagem[48];
-
-    dificuldade = nova;
-    DesenhaOpcoes();
-    snprintf(mensagem, sizeof(mensagem), "Nivel: %s (%lu mg)\r\n",
-             nome_dificuldade[dificuldade],
-             (unsigned long)LIMIAR_ATUAL_MG);
-    USART2_EnviaTexto(mensagem);
-}
-
-// Gestão do botão SW5
-static uint8_t botao_em_espera = 0U;
-static uint32_t bloco_inicio_botao = 0U;
-static uint32_t ultimo_bloco_botao = 0U;
-
-// Ao carregar no botão (chamado via interrupção EXTI1)
-static void BotaoCarregado(uint32_t numero_bloco) {
-
-    if ((estado_jogo != JOGO_MENU) || (botao_em_espera != 0U)) {
-        return;
-    }
-    if ((numero_bloco - ultimo_bloco_botao) < BOTAO_DEBOUNCE_BLOCOS) {
-        return;
-    }
-    botao_em_espera = 1U;
-    bloco_inicio_botao = numero_bloco;
-}
-
-// Verifica se foi clique ou segurar durante 1 s
-static void VerificaBotao(uint32_t numero_bloco) {
-
-    if (botao_em_espera == 0U) {
-        return;
-    }
-    if (estado_jogo != JOGO_MENU) {
-        botao_em_espera = 0U;
-        return;
-    }
-
-    // PA1 ativo a zero: Bit_SET = botão largado
-    if (GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_1) == Bit_SET) {
-        botao_em_espera = 0U;
-        ultimo_bloco_botao = numero_bloco;
-        MudaDificuldade((uint8_t)((dificuldade + 1U) % NUM_DIFICULDADES)); // clique: muda nível
-    }
-    else if ((numero_bloco - bloco_inicio_botao) >= BOTAO_SEGURAR_BLOCOS) {
-        botao_em_espera = 0U;
-        ultimo_bloco_botao = numero_bloco;
-        IniciaJogo(); // segurou 1 s: começa o jogo
     }
 }
 
@@ -1188,30 +1073,22 @@ static void VerificaBotao(uint32_t numero_bloco) {
 static void TrataComando(char c) {
 
     if ((c == '\r') || (c == '\n')) return;
+
     if ((c == 'h') || (c == '?')) {
-        MostraAjuda();
-        return;
-    }
-    if (estado_jogo != JOGO_MENU) {
-        USART2_EnviaTexto("Comando so no menu (fim do jogo).\r\n");
+        USART2_EnviaTexto("Comandos: j = iniciar jogo | r = apagar recorde | h = ajuda\r\n");
         return;
     }
 
     switch (c) {
     case 'r':
-        for (uint8_t i = 0U; i < NUM_DIFICULDADES; i++) {
-            recorde_blocos[i] = 0U;
-        }
-        MostraRecorde(MENU_REC_X, MENU_REC_Y);
-        USART2_EnviaTexto("Recordes apagados.\r\n");
-        break;
-    case '1':
-    case '2':
-    case '3':
-        MudaDificuldade((uint8_t)(c - '1'));
+        recorde_blocos = 0U;
+        MostraRecorde();
+        USART2_EnviaTexto("Recorde apagado.\r\n");
         break;
     case 'j':
-        IniciaJogo();
+        if (estado_jogo == JOGO_ESPERA) {
+            IniciaJogo();
+        }
         break;
     default:
         USART2_EnviaTexto("Comando desconhecido (h = ajuda).\r\n");
@@ -1233,25 +1110,24 @@ int main(void) {
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_AFIO, ENABLE);
     lcd_init();
 
-    // Desenhar a página do menu inicial
-    DesenhaMenu();
+    // Desenhar a interface do jogo diretamente (ecrã único)
+    DesenhaEcraJogo();
 
     // 3. Inicialização dos periféricos
     USART2_Config();      // USART2 com interrupção RX
     ConfiguraLED();       // LED PB1 (rebentamento)
-    ADC1_DMA_Config();    // ADC1 e DMA1
+    ADC1_DMA_Config();    // ADC1 e DMA1 com interrupções HT/TC
     TIM3_Config_200Hz();  // Timer 3 a 200 Hz
     PWM_LED_Config();     // PWM no LED PB0 (TIM3_CH3)
     Botao_EXTI_Config();  // Botão SW5 (EXTI1)
     NVIC_Config();        // Configurar as interrupções
 
     // 4. Mensagens iniciais na USART2
-    USART2_EnviaTexto("\r\nPROJETO SISEM\r\n");
-    USART2_EnviaTexto("ADC + DMA (IRQ HT/TC) + TIM3 + LCD\r\n");
-    USART2_EnviaTexto("200Hz | Med5 | BAIXA/MEDIA/ALTA | POP=300/500/700mg\r\n");
-    USART2_EnviaTexto("DESAFIO DO BALAO: escolhe o nivel, segura SW5 1 s e rebenta em menos de 20 s\r\n");
-    USART2_EnviaTexto("LCD e USART: eventos + 1 linha / 2 blocos; DMA_desc=descartes\r\n");
-    MostraAjuda();
+    USART2_EnviaTexto("\r\n========================================\r\n");
+    USART2_EnviaTexto("PROJETO SISEM - DESAFIO DO BALAO\r\n");
+    USART2_EnviaTexto("ADC + DMA (NVIC) + TIM3 (TRGO/PWM) + LCD\r\n");
+    USART2_EnviaTexto("200 Hz | 3 Eixos | Med5 | POP = 500 mg\r\n");
+    USART2_EnviaTexto("========================================\r\n");
 
     // 5. Iniciar o DMA e o TIM3
     DMA_ClearFlag(DMA1_FLAG_GL1);
@@ -1275,9 +1151,11 @@ int main(void) {
         comando_usart      = 0;
         __enable_irq();
 
-        // Botão SW5: marca início do toque
+        // Botão SW5: se estiver em espera, inicia o jogo
         if (botao != 0U) {
-            BotaoCarregado(numero_bloco);
+            if (estado_jogo == JOGO_ESPERA) {
+                IniciaJogo();
+            }
         }
 
         // Trata comando recebido pela USART2
@@ -1297,9 +1175,6 @@ int main(void) {
             MostraBloco(1, numero_bloco);
         }
 
-        // Verifica estado do botão (clique ou segurar 1 s)
-        if (pendentes != 0U) {
-            VerificaBotao(numero_bloco);
-        }
+        
     }
 }
