@@ -6,7 +6,7 @@
 
  *
 
- * VERSAO JOGO - ADC + DMA + TIM3 + LCD + DESAFIO DO BALAO
+ * VERSAO JOGO - ADC + DMA (com interrupcao) + TIM3 + LCD + DESAFIO DO BALAO
 
  *
 
@@ -30,7 +30,17 @@
 
  *   3) Objetivo: rebentar o balao no menor tempo possivel (max. 20 s).
 
- *   4) O melhor tempo fica guardado como recorde (RAM).
+ *   4) O melhor tempo fica guardado como recorde (RAM), um por dificuldade.
+
+ *
+
+ * EXTRAS (aplicam NVIC, EXTI, USART RX e PWM):
+
+ *   - SW5 (PA1, EXTI1): muda a dificuldade FACIL/NORMAL/DIFICIL (300/500/700 mg).
+
+ *   - Terminal (USART2 RX): h ajuda, r apaga recordes, 1/2/3 dificuldade.
+
+ *   - LED PB0 (TIM3_CH3 em PWM): brilho proporcional a barra.
 
  *   A aquisicao (ADC/DMA/TIM3) e os calculos (RMS, Med5) nao mudaram.
 
@@ -55,7 +65,7 @@
 #define BARRA_Y                   73U
 #define BARRA_LARGURA            104U
 #define BARRA_ALTURA               8U
-#define BARRA_RMS_MAX_MG        500U
+#define BARRA_RMS_MAX_MG        500U  // valor NORMAL; agora depende da dificuldade
 #define BARRA_RUIDO_REPOUSO_MG   35U
 #define BARRA_PERIODO_BLOCOS      2U  // 2 x 160 ms = 320 ms (jogo mais fluido)
 #define BARRA_DELTA_MIN_PX        3U
@@ -78,7 +88,7 @@
 #define NIVEL_ALTA_SAI_MG       230U
 
 // Rebenta apenas quando a MEDIANA ultrapassa 500 mg em 3 blocos seguidos.
-#define LIMIAR_REBENTAMENTO_MG  500U
+#define LIMIAR_REBENTAMENTO_MG  500U  // valor NORMAL; agora depende da dificuldade
 #define REBENTAMENTO_BLOCOS       3U
 
 // Mostrar o rebentamento (ou o fim do tempo) durante 16 blocos (~2,6 s).
@@ -125,6 +135,12 @@
 // 2 metades, 32 amostras por metade, 3 eixos
 
 volatile uint16_t adc_buffer[2][AMOSTRAS_BLOCO][3];
+// Metades do buffer prontas, marcadas pela interrupcao do DMA
+// (DMA1_Channel1_IRQHandler em stm32f10x_it.c):
+//   bit 0 = 1.a metade pronta (Half Transfer)
+//   bit 1 = 2.a metade pronta (Transfer Complete)
+// volatile: e alterada dentro da interrupcao e lida no main.
+volatile uint8_t dma_metade_pronta = 0U;
 // Numero de metades DMA rejeitadas por terem sido alcancadas pela escrita.
 static uint32_t blocos_dma_descartados = 0U;
 
@@ -231,6 +247,9 @@ void USART2_Config(void)
         USART_Mode_Rx | USART_Mode_Tx;
 
     USART_Init(USART2, &USART_InitStructure);
+
+    // Interrupcao quando chega um caracter (comandos do PC)
+    USART_ITConfig(USART2, USART_IT_RXNE, ENABLE);
 
     USART_Cmd(USART2, ENABLE);
 
@@ -364,6 +383,9 @@ void ADC1_DMA_Config(void)
 
     DMA_Init(DMA1_Channel1, &DMA_InitStructure);
 
+    // Gerar interrupcao a meio (HT) e no fim (TC) do buffer.
+    DMA_ITConfig(DMA1_Channel1, DMA_IT_HT | DMA_IT_TC, ENABLE);
+
     // 4. Configurar ADC
 
     ADC_DeInit(ADC1);
@@ -452,6 +474,36 @@ void ADC1_DMA_Config(void)
 
     ADC_ExternalTrigConvCmd(ADC1, ENABLE);
 
+}
+
+// =====================================================
+// NVIC - DMA1 CANAL 1, EXTI1 (SW5) E USART2 (RX)
+// =====================================================
+// PriorityGroup_1: 1 bit de preempcao (0..1), 3 bits de sub-prioridade.
+// O DMA tem a preempcao mais alta (0): se uma metade nao for tratada a
+// tempo, o DMA escreve por cima. O botao e a USART sao a velocidade
+// humana: preempcao 1, e entre eles decide a sub-prioridade.
+void NVIC_Config(void)
+{
+    NVIC_InitTypeDef NVIC_InitStructure;
+
+    NVIC_PriorityGroupConfig(NVIC_PriorityGroup_1);
+
+    NVIC_InitStructure.NVIC_IRQChannel = DMA1_Channel1_IRQn;
+    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0; // mais prioritario
+    NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0;
+    NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
+    NVIC_Init(&NVIC_InitStructure);
+
+    NVIC_InitStructure.NVIC_IRQChannel = EXTI1_IRQn;
+    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 1;
+    NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0;
+    NVIC_Init(&NVIC_InitStructure);
+
+    NVIC_InitStructure.NVIC_IRQChannel = USART2_IRQn;
+    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 1;
+    NVIC_InitStructure.NVIC_IRQChannelSubPriority = 1;
+    NVIC_Init(&NVIC_InitStructure);
 }
 
 // =====================================================
@@ -563,7 +615,25 @@ static uint8_t pode_rebentar = 1U;
 // Estado do jogo e cronometro (contados em blocos de 160 ms).
 static uint8_t estado_jogo = JOGO_ESPERA;
 static uint32_t tempo_jogo_blocos = 0U;
-static uint32_t recorde_blocos = 0U;   // 0 = ainda sem recorde
+
+// Dificuldade: limiar de rebentamento = fim de escala da barra (mg).
+// A barra tem de estar cheia para rebentar, por isso os dois sao iguais.
+#define DIF_FACIL    0U
+#define DIF_NORMAL   1U
+#define DIF_DIFICIL  2U
+#define NUM_DIFICULDADES 3U
+static const uint32_t limiar_dificuldade_mg[NUM_DIFICULDADES] = {300U, 500U, 700U};
+static const char *nome_dificuldade[NUM_DIFICULDADES] = {"FACIL", "NORMAL", "DIFICIL"};
+static const uint16_t cor_dificuldade[NUM_DIFICULDADES] = {LCD_VERDE, LCD_AMARELO, LCD_VERMELHO};
+static uint8_t dificuldade = DIF_NORMAL;
+#define LIMIAR_ATUAL_MG  (limiar_dificuldade_mg[dificuldade])
+
+// Recorde (melhor tempo) por dificuldade; 0 = ainda sem recorde.
+static uint32_t recorde_blocos[NUM_DIFICULDADES] = {0U, 0U, 0U};
+
+// Marcas escritas pelas rotinas de interrupcao (stm32f10x_it.c).
+volatile uint8_t botao_pressionado = 0U;  // EXTI1_IRQHandler (SW5)
+volatile char comando_usart = 0;          // USART2_IRQHandler (RXNE)
 
 // Estado do texto de intensidade, independente da velocidade do balao.
 #define VIB_BAIXA 0U
@@ -612,7 +682,41 @@ static void MostraCronometro(void)
 
 static void MostraRecorde(void)
 {
-    EscreveTempo(70U, "REC:", recorde_blocos, 1U, LCD_CIANO);
+    EscreveTempo(70U, "REC:", recorde_blocos[dificuldade], 1U, LCD_CIANO);
+}
+
+// Nome da dificuldade, centrado entre o "0" e o fim de escala (y = 53).
+static void MostraDificuldade(void)
+{
+    const char *nome = nome_dificuldade[dificuldade];
+    uint8_t n = 0U;
+
+    while (nome[n] != '\0')
+    {
+        n++;
+    }
+    lcd_draw_fillrect(18U, 53U, 62U, 8U, LCD_PRETO);
+    lcd_draw_string((uint8_t)(49U - n * 3U), 53U, (unsigned char *)nome,
+                    cor_dificuldade[dificuldade], 1U);
+}
+
+// Fim de escala da barra, por exemplo "500 mg".
+static void MostraEscala(void)
+{
+    char texto[8];
+    snprintf(texto, sizeof(texto), "%3lu mg",
+             (unsigned long)LIMIAR_ATUAL_MG);
+    lcd_draw_string(82U, 53U, (unsigned char *)texto, LCD_BRANCO, 1U);
+}
+
+// Ecra de espera: dificuldade, escala, recorde e convite para jogar.
+static void AtualizaEcraEspera(void)
+{
+    MostraDificuldade();
+    MostraEscala();
+    MostraRecorde();
+
+    MostraEstado("ABANA P/ JOGAR", LCD_BRANCO);
 }
 
 // Escreve apenas quando ha uma mudanca de nivel (pouco trafego SPI).
@@ -685,15 +789,15 @@ static uint8_t AlvoBarra(uint32_t mediana_mg)
     {
         return 0U;
     }
-    if (mediana_mg >= BARRA_RMS_MAX_MG)
+    if (mediana_mg >= LIMIAR_ATUAL_MG)
     {
         return BARRA_LARGURA;
     }
 
     return (uint8_t)(
         ((mediana_mg - BARRA_RUIDO_REPOUSO_MG) * BARRA_LARGURA +
-         (BARRA_RMS_MAX_MG - BARRA_RUIDO_REPOUSO_MG) / 2U) /
-        (BARRA_RMS_MAX_MG - BARRA_RUIDO_REPOUSO_MG));
+         (LIMIAR_ATUAL_MG - BARRA_RUIDO_REPOUSO_MG) / 2U) /
+        (LIMIAR_ATUAL_MG - BARRA_RUIDO_REPOUSO_MG));
 }
 
 static uint8_t RaioParaBarra(uint8_t largura)
@@ -893,12 +997,76 @@ static void ConfiguraLED(void)
     GPIO_InitTypeDef gpio;
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOB, ENABLE);
 
-    // PB1 - saida para o LED. O botao PA1 ja nao e utilizado.
+    // PB1 - saida para o LED do rebentamento.
     gpio.GPIO_Pin = GPIO_Pin_1;
     gpio.GPIO_Speed = GPIO_Speed_2MHz;
     gpio.GPIO_Mode = GPIO_Mode_Out_PP;
     GPIO_Init(GPIOB, &gpio);
     AtualizaLED(0U);
+}
+
+// =====================================================
+// PWM NO LED PB0 (TIM3 CANAL 3)
+// =====================================================
+// O TIM3 ja conta a 200 Hz (ARR = 49) para disparar o ADC.
+// O canal 3 do mesmo timer gera PWM no PB0 com esse periodo:
+// duty = CCR3 / 50. O evento de update (TRGO) nao e afetado.
+static void PWM_LED_Config(void)
+{
+    GPIO_InitTypeDef gpio;
+    TIM_OCInitTypeDef oc;
+
+    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOB, ENABLE);
+
+    // PB0 = TIM3_CH3: funcao alternativa push-pull
+    gpio.GPIO_Pin = GPIO_Pin_0;
+    gpio.GPIO_Speed = GPIO_Speed_2MHz;
+    gpio.GPIO_Mode = GPIO_Mode_AF_PP;
+    GPIO_Init(GPIOB, &gpio);
+
+    TIM_OCStructInit(&oc);
+    oc.TIM_OCMode = TIM_OCMode_PWM1;          // ativo enquanto CNT < CCR3
+    oc.TIM_OutputState = TIM_OutputState_Enable;
+    oc.TIM_Pulse = 0U;                        // comeca apagado
+#if LED_ATIVO_ALTO == 0U
+    oc.TIM_OCPolarity = TIM_OCPolarity_Low;
+#else
+    oc.TIM_OCPolarity = TIM_OCPolarity_High;
+#endif
+    TIM_OC3Init(TIM3, &oc);
+    TIM_OC3PreloadConfig(TIM3, TIM_OCPreload_Enable);
+}
+
+// Brilho proporcional a barra: 0 px -> 0 %, 104 px -> 100 % (CCR3 = 50).
+static void AtualizaPWM(uint8_t barra_px)
+{
+    TIM_SetCompare3(TIM3, (uint16_t)(((uint32_t)barra_px * 50U) / BARRA_LARGURA));
+}
+
+// =====================================================
+// BOTAO SW5 (PA1) -> EXTI1
+// =====================================================
+// Ativo a zero (pull-up): carregar = flanco descendente.
+static void Botao_EXTI_Config(void)
+{
+    GPIO_InitTypeDef gpio;
+    EXTI_InitTypeDef EXTI_InitStructure;
+
+    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA | RCC_APB2Periph_AFIO, ENABLE);
+
+    gpio.GPIO_Pin = GPIO_Pin_1;
+    gpio.GPIO_Speed = GPIO_Speed_2MHz;
+    gpio.GPIO_Mode = GPIO_Mode_IPU;
+    GPIO_Init(GPIOA, &gpio);
+
+    // Ligar o pino PA1 a linha de interrupcao externa EXTI1
+    GPIO_EXTILineConfig(GPIO_PortSourceGPIOA, GPIO_PinSource1);
+
+    EXTI_InitStructure.EXTI_Line = EXTI_Line1;
+    EXTI_InitStructure.EXTI_Mode = EXTI_Mode_Interrupt;
+    EXTI_InitStructure.EXTI_Trigger = EXTI_Trigger_Falling;
+    EXTI_InitStructure.EXTI_LineCmd = ENABLE;
+    EXTI_Init(&EXTI_InitStructure);
 }
 
 // Maquina de estados do jogo, chamada em todos os blocos de 160 ms.
@@ -946,7 +1114,7 @@ static uint8_t AtualizaJogo(uint32_t rms_mediana_mg)
             return 4U;
         }
 
-        if (rms_mediana_mg >= LIMIAR_REBENTAMENTO_MG)
+        if (rms_mediana_mg >= LIMIAR_ATUAL_MG)
         {
             if (contador_rebentamento < REBENTAMENTO_BLOCOS)
             {
@@ -977,12 +1145,13 @@ static uint8_t AtualizaJogo(uint32_t rms_mediana_mg)
                               BARRA_LARGURA, BARRA_ALTURA, LCD_PRETO);
             barra_desenhada_px = 0U;
             barra_visual_px = 0U;
+            AtualizaPWM(0U);
             DesenhaExplosao();
 
-            if ((recorde_blocos == 0U) ||
-                (tempo_jogo_blocos < recorde_blocos))
+            if ((recorde_blocos[dificuldade] == 0U) ||
+                (tempo_jogo_blocos < recorde_blocos[dificuldade]))
             {
-                recorde_blocos = tempo_jogo_blocos;
+                recorde_blocos[dificuldade] = tempo_jogo_blocos;
                 MostraRecorde();
                 MostraEstado("NOVO RECORDE!", LCD_CIANO);
             }
@@ -1011,8 +1180,9 @@ static uint8_t AtualizaJogo(uint32_t rms_mediana_mg)
             barra_desenhada_px = 0U;
             nivel_vibracao = VIB_BAIXA;
             balao_raio_desenhado = 0U;
+            AtualizaPWM(0U);
             BalaoInicial();
-            MostraEstado("ABANA P/ JOGAR", LCD_BRANCO);
+            AtualizaEcraEspera();
             return 2U;
         }
         return 0U;
@@ -1050,6 +1220,9 @@ static uint8_t AtualizaAnimacao(uint32_t rms_mediana_mg, uint32_t bloco)
         }
         barra_visual_px = (uint8_t)(barra_visual_px - diferenca);
     }
+
+    // O brilho do LED PB0 segue o valor visual da barra.
+    AtualizaPWM(barra_visual_px);
 
     // A barra so escreve os pixeis que aumentaram ou desapareceram.
     diferenca = (uint8_t)((barra_visual_px >= barra_desenhada_px) ?
@@ -1226,12 +1399,83 @@ void MostraBloco(uint8_t metade, uint32_t numero)
     if (evento == 1U)
     {
         uint32_t t = (tempo_jogo_blocos * JOGO_MS_POR_BLOCO) / 100U;
-        uint32_t r = (recorde_blocos * JOGO_MS_POR_BLOCO) / 100U;
+        uint32_t r = (recorde_blocos[dificuldade] * JOGO_MS_POR_BLOCO) / 100U;
         snprintf(mensagem, sizeof(mensagem),
-                 ">>> REBENTOU em %lu.%lu s | Recorde: %lu.%lu s\r\n",
+                 ">>> REBENTOU em %lu.%lu s | Recorde %s: %lu.%lu s\r\n",
                  (unsigned long)(t / 10U), (unsigned long)(t % 10U),
+                 nome_dificuldade[dificuldade],
                  (unsigned long)(r / 10U), (unsigned long)(r % 10U));
         USART2_EnviaTexto(mensagem);
+    }
+}
+
+// =====================================================
+// BOTAO E COMANDOS (tratados no main, fora das interrupcoes)
+// =====================================================
+
+static void MostraAjuda(void)
+{
+    USART2_EnviaTexto("Comandos: h ajuda | r apaga recordes | 1 facil | 2 normal | 3 dificil\r\n");
+    USART2_EnviaTexto("Botao SW5: muda a dificuldade (so na espera)\r\n");
+}
+
+static void MudaDificuldade(uint8_t nova)
+{
+    char mensagem[48];
+
+    dificuldade = nova;
+    AtualizaEcraEspera();
+    snprintf(mensagem, sizeof(mensagem), "Dificuldade: %s (%lu mg)\r\n",
+             nome_dificuldade[dificuldade],
+             (unsigned long)LIMIAR_ATUAL_MG);
+    USART2_EnviaTexto(mensagem);
+}
+
+// SW5: na espera, passa para a dificuldade seguinte.
+static void TrataBotao(void)
+{
+    if (estado_jogo == JOGO_ESPERA)
+    {
+        MudaDificuldade((uint8_t)((dificuldade + 1U) % NUM_DIFICULDADES));
+    }
+}
+
+// Um caracter recebido pela USART2.
+static void TrataComando(char c)
+{
+    if ((c == '\r') || (c == '\n'))
+    {
+        return;
+    }
+    if ((c == 'h') || (c == '?'))
+    {
+        MostraAjuda();
+        return;
+    }
+    if (estado_jogo != JOGO_ESPERA)
+    {
+        USART2_EnviaTexto("Comando so na espera (fim do jogo).\r\n");
+        return;
+    }
+
+    switch (c)
+    {
+    case 'r':
+        for (uint8_t i = 0U; i < NUM_DIFICULDADES; i++)
+        {
+            recorde_blocos[i] = 0U;
+        }
+        MostraRecorde();
+        USART2_EnviaTexto("Recordes apagados.\r\n");
+        break;
+    case '1':
+    case '2':
+    case '3':
+        MudaDificuldade((uint8_t)(c - '1'));
+        break;
+    default:
+        USART2_EnviaTexto("Comando desconhecido (h = ajuda).\r\n");
+        break;
     }
 }
 
@@ -1266,10 +1510,8 @@ int main(void)
                     LCD_AMARELO, 1);
     lcd_draw_fillrect(10, 16, 108, 1, LCD_LARANJA);
     MostraCronometro();
-    MostraRecorde();
-    MostraEstado("ABANA P/ JOGAR", LCD_BRANCO);
     lcd_draw_string(10, 53, (unsigned char *)"0", LCD_BRANCO, 1);
-    lcd_draw_string(82, 53, (unsigned char *)"500 mg", LCD_BRANCO, 1);
+    AtualizaEcraEspera();  // dificuldade, escala, recorde, mensagem
 
     // Moldura fixa da barra. Interior: x=12..115, y=73..80.
     lcd_draw_fillrect(10, 70, 108, 1, LCD_BRANCO);
@@ -1294,6 +1536,12 @@ int main(void)
 
     TIM3_Config_200Hz();
 
+    PWM_LED_Config();      // depois do TIM3: usa o canal 3 do mesmo timer
+
+    Botao_EXTI_Config();
+
+    NVIC_Config();         // antes de ligar o DMA e o TIM3
+
     // ================================================
 
     // 4. MENSAGENS INICIAIS
@@ -1302,11 +1550,12 @@ int main(void)
 
     USART2_EnviaTexto("\r\nPROJETO SISEM\r\n");
 
-    USART2_EnviaTexto("ADC + DMA + TIM3 + LCD\r\n");
+    USART2_EnviaTexto("ADC + DMA (IRQ HT/TC) + TIM3 + LCD\r\n");
 
-    USART2_EnviaTexto("200Hz | Med5 | BAIXA/MEDIA/ALTA | POP=500mg\r\n");
+    USART2_EnviaTexto("200Hz | Med5 | BAIXA/MEDIA/ALTA | POP=300/500/700mg\r\n");
     USART2_EnviaTexto("DESAFIO DO BALAO: abana para comecar, rebenta em menos de 20 s\r\n");
     USART2_EnviaTexto("LCD e USART: eventos + 1 linha / 2 blocos; DMA_desc=descartes\r\n");
+    MostraAjuda();
 
     // ================================================
 
@@ -1330,32 +1579,51 @@ int main(void)
 
     {
 
-        // Primeira metade do buffer pronta
+        uint8_t pendentes;
+        uint8_t botao;
+        char comando;
 
-        if (DMA_GetFlagStatus(DMA1_FLAG_HT1) != RESET)
+        // Ler e limpar as marcas das interrupcoes sem que uma ISR
+        // as altere a meio (seccao critica muito curta).
+        __disable_irq();
+        pendentes = dma_metade_pronta;
+        dma_metade_pronta = 0U;
+        botao = botao_pressionado;
+        botao_pressionado = 0U;
+        comando = comando_usart;
+        comando_usart = 0;
+        __enable_irq();
 
+        // Botao SW5 (EXTI1). Debounce: ignora toques a menos de
+        // 2 blocos (320 ms) do anterior.
+        if (botao != 0U)
         {
-
-            DMA_ClearFlag(DMA1_FLAG_HT1);
-
-            numero_bloco++;
-
-            MostraBloco(0, numero_bloco);
-
+            static uint32_t ultimo_bloco_botao = 0U;
+            if ((numero_bloco - ultimo_bloco_botao) >= 2U)
+            {
+                ultimo_bloco_botao = numero_bloco;
+                TrataBotao();
+            }
         }
 
-        // Segunda metade do buffer pronta
-
-        if (DMA_GetFlagStatus(DMA1_FLAG_TC1) != RESET)
-
+        // Comando recebido pelo terminal (USART2 RX).
+        if (comando != 0)
         {
+            TrataComando(comando);
+        }
 
-            DMA_ClearFlag(DMA1_FLAG_TC1);
-
+        // Primeira metade do buffer pronta (interrupcao HT)
+        if ((pendentes & 0x01U) != 0U)
+        {
             numero_bloco++;
+            MostraBloco(0, numero_bloco);
+        }
 
+        // Segunda metade do buffer pronta (interrupcao TC)
+        if ((pendentes & 0x02U) != 0U)
+        {
+            numero_bloco++;
             MostraBloco(1, numero_bloco);
-
         }
 
     }

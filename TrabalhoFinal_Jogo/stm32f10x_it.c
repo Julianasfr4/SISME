@@ -208,17 +208,17 @@ void EXTI0_IRQHandler(void)
 * Output         : None
 * Return         : None
 *******************************************************************************/
-void EXTI1_IRQHandler(void) {
-    if (EXTI_GetITStatus(EXTI_Line1) != RESET) {
+// Marca definida no main.c, tratada no main (com debounce).
+extern volatile uint8_t botao_pressionado;
 
-        // 1. Toggle do LED1
-        GPIOB->ODR ^= GPIO_Pin_1;
-
-        // 2. Fica bloqueado enquanto o botão estiver pressionado
-        while (GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_1) == Bit_RESET);
-
-        // 3. Limpa a flag aqui no fim (evita ricochete/bounce ao soltar o botão)
+void EXTI1_IRQHandler(void)
+{
+    if (EXTI_GetITStatus(EXTI_Line1) != RESET)
+    {
+        // Rotina curta: limpar a flag e avisar o main.
+        // Nunca ficar a espera do botao dentro da interrupcao.
         EXTI_ClearITPendingBit(EXTI_Line1);
+        botao_pressionado = 1U;
     }
 }
 
@@ -262,8 +262,27 @@ void EXTI4_IRQHandler(void)
 * Output         : None
 * Return         : None
 *******************************************************************************/
+// Marcas definidas no main.c: bit 0 = 1.a metade, bit 1 = 2.a metade.
+extern volatile uint8_t dma_metade_pronta;
+
 void DMA1_Channel1_IRQHandler(void)
 {
+    // Rotina curta: so limpa a flag e avisa o main.
+    // O calculo do RMS e o desenho no LCD continuam no main.
+
+    // Half Transfer: a 1.a metade do adc_buffer esta cheia.
+    if (DMA_GetITStatus(DMA1_IT_HT1) != RESET)
+    {
+        DMA_ClearITPendingBit(DMA1_IT_HT1);
+        dma_metade_pronta |= 0x01U;
+    }
+
+    // Transfer Complete: a 2.a metade esta cheia (o DMA volta ao inicio).
+    if (DMA_GetITStatus(DMA1_IT_TC1) != RESET)
+    {
+        DMA_ClearITPendingBit(DMA1_IT_TC1);
+        dma_metade_pronta |= 0x02U;
+    }
 }
 
 /*******************************************************************************
@@ -570,11 +589,21 @@ void USART1_IRQHandler(void)
 * Output         : None
 * Return         : None
 *******************************************************************************/
-void USART2_IRQHandler(void)
+// Marca definida no main.c: ultimo caracter recebido (0 = nenhum).
+extern volatile char comando_usart;
 
+void USART2_IRQHandler(void)
 {
-	// NESTE paramar n usamos isto
-	}
+    // 1. Verificar se a interrupcao foi gerada por rececao (RXNE)
+    if (USART_GetITStatus(USART2, USART_IT_RXNE) != RESET)
+    {
+        // 2. Ler o caracter (a leitura do DR tambem limpa o RXNE)
+        comando_usart = (char)USART_ReceiveData(USART2);
+
+        // 3. Limpar a flag pendente da USART
+        USART_ClearITPendingBit(USART2, USART_IT_RXNE);
+    }
+}
 
 
 /*******************************************************************************
