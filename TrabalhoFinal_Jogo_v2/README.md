@@ -115,3 +115,18 @@ Nenhum estado bloqueia: o ADC e o DMA continuam a adquirir durante todo o jogo.
 7. Durante o jogo, o LED PB0 deve brilhar mais à medida que a barra enche.
 
 Estado: a lógica foi compilada e simulada no PC com cabeçalhos falsos; falta confirmar na placa as posições do texto no LCD (sobretudo o menu, com texto em tamanho 2), as interrupções (no terminal, `DMA_desc` deve ficar a 0 e o número do bloco deve subir cerca de 6 vezes por segundo) e se o LED PB0 é ativo a 1 (se acender ao contrário, pôr `LED_ATIVO_ALTO` a `0U`).
+
+## Gráfico dos resultados (MATLAB)
+
+O script [`grafico_vibracao.m`](grafico_vibracao.m) lê pela porta série as linhas `Bloco N | RMS: X= Y= Z= Total= Med5= mg` que a placa envia pela USART2 (9600 bps), guarda tudo num `.csv` e desenha dois gráficos, que grava num `.png`:
+
+1. O RMS de cada eixo (X, Y, Z) ao longo do tempo.
+2. O RMS total e a Med5, com os limiares dos níveis (300, 500 e 700 mg), os níveis VIB (120 e 260 mg) e os eventos do jogo (INICIO, REBOU, TEMPO ESGOTADO, MENU).
+
+Como usar:
+1. Grava a placa e liga-a ao PC pelo USB.
+2. No início do script, muda `PORTA` (Linux: `/dev/ttyACM0`; Windows: `COM3` ou a que aparecer no Gestor de Dispositivos). Fecha qualquer terminal que esteja a usar a porta.
+3. Corre o script (MATLAB R2019b ou mais recente). Durante os 60 s (`DURACAO_S`), faz a sequência de demonstração: 10 s em repouso, 10 s a abanar fraco, 10 s a abanar forte, um jogo até rebentar e repouso.
+4. Ficam `vibracao_<data>.csv` e `vibracao_<data>.png` na pasta atual.
+
+Se já tiveres o texto do terminal gravado num ficheiro, põe `USAR_FICHEIRO = true` e indica-o em `FICHEIRO_LOG`.
