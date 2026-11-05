@@ -98,15 +98,30 @@
 // PB1: LED do rebentamento. Se for ativo a zero, usar 0U.
 #define LED_ATIVO_ALTO            1U
 
+// Cores em RGB565. O lcd.c configura o ST7735 com MADCTL = 0xC8 (bit BGR
+// ligado) e, neste LCD, isso troca o vermelho com o azul. Com
+// LCD_ORDEM_BGR = 1 as cores sao escritas ja com R e B trocados, para
+// aparecerem certas sem mexer no lcd.c. Verde, branco, preto e cinzento
+// sao iguais nas duas ordens.
+#define LCD_ORDEM_BGR 1U
+
 #define LCD_PRETO  0x0000U
 #define LCD_BRANCO 0xFFFFU
 #define LCD_VERDE  0x07E0U
-#define LCD_VERMELHO 0xF800U
 #define LCD_CINZA  0xC618U
+#if LCD_ORDEM_BGR
+#define LCD_VERMELHO 0x001FU
+#define LCD_AMARELO 0x07FFU
+#define LCD_AZUL   0xF800U
+#define LCD_CIANO  0xFFE0U
+#define LCD_LARANJA 0x053FU
+#else
+#define LCD_VERMELHO 0xF800U
 #define LCD_AMARELO 0xFFE0U
 #define LCD_AZUL   0x001FU
 #define LCD_CIANO  0x07FFU
 #define LCD_LARANJA 0xFD20U
+#endif
 
 // =====================================================
 // JOGO: DESAFIO DO BALAO
