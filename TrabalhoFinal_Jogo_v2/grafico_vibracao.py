@@ -6,11 +6,11 @@ Le as linhas que a placa envia pela USART2 (9600 bps):
 guarda-as num .csv e desenha (e grava num .png):
     1) o RMS de cada eixo (X, Y, Z);
     2) o RMS total e a mediana dos 5 ultimos blocos (Med5), com os
-       limiares dos niveis do jogo e os eventos (INICIO, REBOU, ...).
+       niveis de vibracao (MEDIA 120 mg, ALTA 260 mg) e o fim da barra.
 
 Sequencia de demonstracao sugerida (60 s):
-    10 s em repouso -> 10 s a abanar fraco -> 10 s a abanar forte ->
-    um jogo (segurar SW5 1 s) ate rebentar -> repouso.
+    repouso -> toques leves na mesa -> telemovel a vibrar ao lado da
+    placa -> abanar devagar -> repouso.
 
 Uso:
     python3 grafico_vibracao.py                      (porta /dev/ttyACM0, 60 s)
@@ -31,7 +31,8 @@ matplotlib.use("Agg")  # so grava o .png, nao precisa de janela
 import matplotlib.pyplot as plt
 
 T_BLOCO_S = 0.160                     # 32 amostras / 200 Hz
-LIMIARES = [(300, "FACIL"), (500, "NORMAL"), (700, "DIFICIL")]
+# Niveis de vibracao mostrados no LCD (entrada) e fim da escala da barra.
+LIMIARES = [(120, "VIB MEDIA"), (260, "VIB ALTA"), (500, "fim da barra")]
 
 # Linha de dados: bloco, X, Y, Z, Total, Med5 e um evento opcional [..].
 PADRAO = re.compile(
@@ -102,19 +103,13 @@ def desenha(nome, tempo, dados):
     g1.grid(True)
     g1.legend(loc="upper left")
 
-    # 2) RMS total, Med5, limiares dos niveis e eventos do jogo
+    # 2) RMS total, Med5 e niveis de vibracao
     g2.plot(tempo, total, color="0.6", label="Total")
     g2.plot(tempo, med5, color="black", linewidth=2, label="Med5")
     for valor, nome_nivel in LIMIARES:
         g2.axhline(valor, linestyle="--", color="tab:blue", linewidth=1)
         g2.text(tempo[-1], valor, f"{nome_nivel} {valor} mg ",
                 ha="right", va="bottom", color="tab:blue")
-    for t, d in zip(tempo, dados):
-        evento = d[6]
-        if evento and evento != "LCD":
-            g2.axvline(t, color="tab:orange", linewidth=1)
-            g2.text(t, g2.get_ylim()[1], f" {evento}", rotation=90,
-                    va="top", color="tab:orange")
     g2.set_xlabel("Tempo (s)")
     g2.set_ylabel("RMS total (mg)")
     g2.set_title("RMS total e mediana dos 5 ultimos blocos (Med5)")
