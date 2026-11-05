@@ -1,0 +1,219 @@
+# 🎤 SLIDE 1 — Introdução e objetivos
+
+**Duração aproximada: 50 segundos**
+
+"Bom dia.
+
+O nosso trabalho consiste no desenvolvimento de um sistema de aquisição e monitorização de vibrações, utilizando a placa STM32F103 e o acelerómetro ADXL337.
+
+O principal objetivo foi estudar e implementar o funcionamento do ADC e do DMA, aplicando estes periféricos na aquisição de dados de um sensor real.
+
+O acelerómetro fornece três sinais analógicos, correspondentes aos eixos X, Y e Z.
+
+Como podemos observar no diagrama, esses sinais são convertidos pelo ADC, com uma frequência de aquisição controlada pelo temporizador TIM3.
+
+Os valores são transferidos automaticamente para a memória através do DMA e posteriormente processados para calcular a intensidade da vibração.
+
+Finalmente, os resultados são enviados para o computador pela USART e utilizados para controlar uma interface gráfica no LCD.
+
+Optámos por desenvolver uma aplicação de monitorização de vibrações em vez de um jogo baseado na inclinação da placa."
+
+**Transição:** "Vamos começar por apresentar o sensor utilizado."
+
+---
+
+# 🎤 SLIDE 2 — ADXL337: sensor e ligações ao ADC
+
+**Duração aproximada: 1 minuto**
+
+"O sensor utilizado foi o ADXL337, um acelerómetro MEMS de três eixos.
+
+Este sensor mede acelerações através de pequenas estruturas mecânicas integradas no próprio circuito.
+
+Quando existe uma aceleração, o sensor produz uma variação de tensão na saída correspondente.
+
+O ADXL337 possui três saídas analógicas, uma para cada eixo: XOUT, YOUT e ZOUT.
+
+Isto significa que, ao contrário de sensores digitais que comunicam por SPI ou I2C, precisamos de utilizar o ADC do microcontrolador para converter as tensões em valores digitais.
+
+O nosso ADC tem uma resolução de 12 bits, ou seja, representa cada conversão através de um valor entre zero e 4095.
+
+Ligámos o eixo X ao pino PC2, correspondente ao canal 12 do ADC1; o eixo Y ao PC1, canal 11; e o eixo Z ao PC0, canal 10.
+
+Segundo o datasheet, o sensor apresenta uma sensibilidade típica de 300 milivolts por g, com uma alimentação de 3 volts.
+
+Como essa sensibilidade é ratiométrica, utilizámos uma estimativa nominal de 330 milivolts por g para uma alimentação de 3,3 volts.
+
+É com base nessa sensibilidade que convertemos os valores adquiridos numa estimativa de aceleração expressa em mg."
+
+**Transição:** "Depois de identificarmos os canais, precisámos de definir como e quando seriam adquiridos."
+
+---
+
+# 🎤 SLIDE 3 — ADC1 e TIM3: aquisição periódica
+
+**Duração aproximada: 1 minuto e 15 segundos**
+
+"Para adquirir os dados do acelerómetro, configurámos o ADC1 do STM32.
+
+Ativámos o modo Scan, que permite converter vários canais numa sequência definida.
+
+No nosso caso, a sequência começa pelo eixo X, passa pelo Y e termina no Z.
+
+Desativámos a conversão contínua porque queríamos controlar exatamente quando começava cada sequência de conversões.
+
+Para isso, utilizámos o temporizador TIM3.
+
+Configurámos o temporizador para gerar um evento de atualização a uma frequência de 200 hertz.
+
+Isto significa que, a cada cinco milissegundos, o TIM3 desencadeia uma sequência de três conversões no ADC.
+
+Para obter esta frequência, utilizámos um prescaler de 7199 e um valor de auto-reload de 49, considerando um clock do temporizador de 72 megahertz.
+
+Escolhemos esta abordagem porque garante uma frequência de aquisição regular, sem depender da execução do programa principal.
+
+Isto é importante porque, ao mesmo tempo, o microcontrolador precisa de realizar cálculos, enviar informações pela USART e atualizar o LCD.
+
+Desta forma, as operações gráficas não determinam o instante em que as conversões são iniciadas.
+
+A frequência de 200 hertz foi escolhida para acompanhar vibrações relativamente lentas, mantendo uma quantidade de dados adequada ao processamento.
+
+Naturalmente, esta frequência também impõe limitações: não permite caracterizar corretamente vibrações de qualquer frequência."
+
+**Transição:** "Depois de converter os sinais, precisamos de transferir os resultados para a memória."
+
+---
+
+# 🎤 SLIDE 4 — DMA circular
+
+**Duração aproximada: 1 minuto e 15 segundos**
+
+"Para transferir os valores do ADC para a memória, utilizámos o DMA1, canal 1.
+
+DMA significa Direct Memory Access e permite realizar transferências entre periféricos e memória sem que o processador tenha de copiar individualmente cada amostra.
+
+No nosso caso, o DMA lê os resultados do registo de dados do ADC e coloca-os automaticamente num buffer em RAM.
+
+Configurámos o DMA em modo circular.
+
+Isto significa que, quando chega ao final do buffer, recomeça automaticamente no início, permitindo uma aquisição contínua.
+
+O nosso buffer está dividido em duas metades, cada uma com 32 conjuntos de três amostras.
+
+Como adquirimos 200 conjuntos de amostras por segundo, cada metade corresponde a 160 milissegundos de dados.
+
+O programa utiliza as flags de meia transferência e de transferência completa para saber quando uma metade está pronta.
+
+Depois, copia essa metade para uma zona de memória local, onde realiza o processamento.
+
+A principal vantagem desta implementação é permitir que a aquisição continue enquanto a CPU calcula os valores RMS, comunica pela USART e atualiza a interface gráfica.
+
+Também acrescentámos uma verificação para evitar utilizar uma metade do buffer que já esteja a ser reescrita pelo DMA.
+
+Esta solução melhora a robustez da aquisição, embora não elimine completamente a possibilidade de perder blocos se o processamento demorar demasiado."
+
+**Transição:** "Com os dados disponíveis, passamos então ao cálculo da intensidade da vibração."
+
+---
+
+# 🎤 SLIDE 5 — Processamento: RMS, mg e Med5
+
+**Duração aproximada: 1 minuto e 30 segundos**
+
+"Depois de adquirir as amostras, precisamos de transformar os valores digitais numa informação que represente a intensidade da vibração.
+
+Para isso, decidimos calcular o RMS, ou valor eficaz, da componente variável da aceleração.
+
+Começamos por calcular a média das 32 amostras de cada eixo.
+
+Depois, subtraímos essa média a cada amostra.
+
+Esta operação permite retirar a componente constante de cada janela, incluindo a contribuição estática da gravidade.
+
+Em seguida, calculamos o RMS da componente variável: elevamos as diferenças ao quadrado, calculamos a média desses quadrados e aplicamos a raiz quadrada.
+
+Repetimos este procedimento para os três eixos.
+
+Depois, combinamos os valores RMS de X, Y e Z para obter uma medida global da intensidade da vibração.
+
+Através da sensibilidade nominal do acelerómetro, convertemos os resultados para mg.
+
+Durante os ensaios, verificámos que algumas medições apresentavam picos isolados, especialmente associados às atualizações do LCD.
+
+Como esses picos provocavam oscilações indesejadas na animação, implementámos uma mediana móvel de cinco blocos.
+
+O funcionamento é simples: guardamos os últimos cinco valores RMS totais, ordenamo-los e selecionamos o valor central.
+
+Por exemplo, se tivermos os valores 20, 22, 85, 21 e 19 mg, a mediana será 21 mg.
+
+Desta forma, o valor anormal de 85 mg não altera significativamente o resultado.
+
+É importante salientar que este filtro não elimina a origem das perturbações, mas reduz a sua influência na visualização.
+
+Mantemos os valores RMS originais e os valores filtrados disponíveis através da USART2, configurada a 9600 bits por segundo."
+
+**Transição:** "Finalmente, utilizámos os valores filtrados para desenvolver a nossa demonstração no LCD."
+
+---
+
+# 🎤 SLIDE 6 — Demonstração e conclusões
+
+**Duração aproximada: 1 minuto e 15 segundos**
+
+"Para demonstrar os resultados, desenvolvemos uma interface gráfica que representa a intensidade da vibração através de uma barra e de um balão animado.
+
+A interface utiliza o valor filtrado pela mediana de cinco blocos.
+
+Quando a intensidade da vibração aumenta, a barra cresce e o balão aumenta de tamanho.
+
+Quando a vibração diminui, a barra e o balão regressam gradualmente ao estado inicial.
+
+Também implementámos três níveis de intensidade: baixa, média e alta.
+
+Para evitar que o texto esteja constantemente a mudar quando os valores se encontram próximos dos limites, utilizámos histerese.
+
+Isto significa que os valores necessários para subir de nível são diferentes dos valores utilizados para descer.
+
+Definimos ainda uma zona morta de 35 mg, para impedir que pequenas oscilações em repouso provoquem alterações gráficas.
+
+Quando a vibração atinge o limiar de 500 mg e são cumpridas as condições de confirmação, o balão rebenta.
+
+Nesse momento, surge uma mensagem no LCD, o LED é ativado temporariamente e, depois, o sistema reinicia automaticamente a animação.
+
+Uma das dificuldades que encontrámos foi a ocorrência de perturbações nas medições associadas às atualizações do LCD.
+
+Para reduzir o seu impacto, utilizámos a mediana e procurámos diminuir a frequência e a quantidade de operações gráficas.
+
+Em conclusão, conseguimos implementar um sistema completo de aquisição, processamento, transmissão e visualização de vibrações.
+
+O projeto permitiu-nos compreender melhor o funcionamento do ADC, do DMA e dos temporizadores do STM32, bem como a importância do processamento dos dados adquiridos."
+
+**Frase final:**
+
+"Vamos agora demonstrar o funcionamento do sistema."
+
+---
+
+# 🎈 DEMONSTRAÇÃO PRÁTICA
+
+**Duração aproximada: 1 a 2 minutos**
+
+**1. Mostrar a placa em repouso**
+
+"Neste momento, como a placa está em repouso, os valores RMS são relativamente baixos e o balão mantém-se próximo do tamanho mínimo."
+
+**2. Aplicar vibração moderada**
+
+"Se aplicarmos uma vibração, podemos observar o aumento dos valores RMS transmitidos pela USART e o crescimento da barra e do balão."
+
+**3. Diminuir a vibração**
+
+"Quando deixamos de aplicar a vibração, os valores começam a diminuir e a animação regressa progressivamente ao estado inicial."
+
+**4. Mostrar o rebentamento, caso seja possível**
+
+"Se mantivermos uma vibração suficientemente elevada e forem cumpridas as condições programadas, o balão rebenta e o sistema reinicia automaticamente."
+
+**Encerramento:**
+
+"Esta demonstração permite observar o percurso completo dos dados: desde a aquisição dos sinais analógicos até à sua utilização numa representação gráfica."
