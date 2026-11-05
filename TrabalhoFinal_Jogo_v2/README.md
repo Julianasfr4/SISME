@@ -116,17 +116,22 @@ Nenhum estado bloqueia: o ADC e o DMA continuam a adquirir durante todo o jogo.
 
 Estado: a lógica foi compilada e simulada no PC com cabeçalhos falsos; falta confirmar na placa as posições do texto no LCD (sobretudo o menu, com texto em tamanho 2), as interrupções (no terminal, `DMA_desc` deve ficar a 0 e o número do bloco deve subir cerca de 6 vezes por segundo) e se o LED PB0 é ativo a 1 (se acender ao contrário, pôr `LED_ATIVO_ALTO` a `0U`).
 
-## Gráfico dos resultados (MATLAB)
+## Gráfico dos resultados (Python)
 
-O script [`grafico_vibracao.m`](grafico_vibracao.m) lê pela porta série as linhas `Bloco N | RMS: X= Y= Z= Total= Med5= mg` que a placa envia pela USART2 (9600 bps), guarda tudo num `.csv` e desenha dois gráficos, que grava num `.png`:
+O script [`grafico_vibracao.py`](grafico_vibracao.py) lê pela porta série as linhas `Bloco N | RMS: X= Y= Z= Total= Med5= mg` que a placa envia pela USART2 (9600 bps), guarda tudo num `.csv` e grava dois gráficos num `.png`:
 
-1. O RMS de cada eixo (X, Y, Z) ao longo do tempo.
-2. O RMS total e a Med5, com os limiares dos níveis (300, 500 e 700 mg), os níveis VIB (120 e 260 mg) e os eventos do jogo (INICIO, REBOU, TEMPO ESGOTADO, MENU).
+1. O RMS de cada eixo (X, Y, Z) ao longo do tempo (t = (bloco − bloco inicial) × 0,16 s).
+2. O RMS total (cinzento) e a Med5 (preto), com os limiares dos níveis (FACIL 300, NORMAL 500, DIFICIL 700 mg) a tracejado e os eventos do jogo (INICIO, REBOU, TEMPO ESGOTADO, MENU) como linhas verticais.
 
-Como usar:
-1. Grava a placa e liga-a ao PC pelo USB.
-2. No início do script, muda `PORTA` (Linux: `/dev/ttyACM0`; Windows: `COM3` ou a que aparecer no Gestor de Dispositivos). Fecha qualquer terminal que esteja a usar a porta.
-3. Corre o script (MATLAB R2019b ou mais recente). Durante os 60 s (`DURACAO_S`), faz a sequência de demonstração: 10 s em repouso, 10 s a abanar fraco, 10 s a abanar forte, um jogo até rebentar e repouso.
+Instalar uma vez (num ambiente virtual, para não haver conflitos com os pacotes do sistema):
+
+```
+python3 -m venv venv
+venv/bin/pip install pyserial matplotlib
+```
+
+Usar:
+1. Grava a placa e liga-a ao PC pelo USB do ST-Link. Fecha qualquer terminal (screen, PuTTY) que esteja a usar a porta.
+2. Corre `venv/bin/python grafico_vibracao.py` (porta `/dev/ttyACM0`, 60 s). Opções: `--porta COM3` (Windows), `--tempo 90`, ou `--ficheiro registo.txt` para ler um registo do terminal já gravado.
+3. Durante a aquisição, faz a sequência de demonstração: 10 s em repouso, 10 s a abanar fraco, 10 s a abanar forte, um jogo até rebentar e repouso.
 4. Ficam `vibracao_<data>.csv` e `vibracao_<data>.png` na pasta atual.
-
-Se já tiveres o texto do terminal gravado num ficheiro, põe `USAR_FICHEIRO = true` e indica-o em `FICHEIRO_LOG`.
