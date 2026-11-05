@@ -6,7 +6,7 @@ A aquisição e o processamento não mudaram. Mudaram a interface no LCD, a lóg
 
 ## Como se joga
 
-1. Ao ligar, aparece o **menu**, numa página à parte e o mais simples possível: o título e as três opções (FACIL, NORMAL, DIFICIL), uma por linha. A escolhida tem um `>` à frente e fica na cor do nível; as outras ficam a cinzento. Em baixo só diz **SEGURA 1s = JOGAR**.
+1. Ao ligar, aparece o **menu**, numa página à parte e o mais simples possível: o título, os três níveis (FACIL, NORMAL, DIFICIL) e a dica **SEGURA SW5: JOGAR**. O nível escolhido tem uma seta `>` e a sua cor; os outros ficam a cinzento.
 2. **Clique** no SW5 (largar antes de 1 s): passa para o nível seguinte.
 3. **Segurar** o SW5 durante 1 s: começa o desafio. O ecrã muda para a página do jogo e aparece a contagem **PREPARA... 3, 2, 1**.
 4. Aparece **VAI! ABANA!** e o cronómetro (**TEMPO: ss.d s**) começa a contar.
@@ -109,9 +109,9 @@ Nenhum estado bloqueia: o ADC e o DMA continuam a adquirir durante todo o jogo.
 1. No STM32CubeIDE, abre o projeto da placa (3SO) e guarda uma cópia do `main.c` atual.
 2. Substitui o `main.c` e o `stm32f10x_it.c` por estes (o handler do DMA está no `stm32f10x_it.c`). Confirma que o projeto tem `lcd.c`, `lcd.h` e `syscalls.c`.
 3. Compila, grava a placa e abre um terminal a 9600 bps (por exemplo `screen /dev/ttyUSB0 9600`).
-4. No menu, clica no SW5: a caixa pintada passa para o nível seguinte.
+4. No menu, clica no SW5: a seta passa para o nível seguinte.
 5. Segura o SW5 1 s: aparece a página do jogo e a contagem. Abana até rebentar e confirma que volta ao menu. Joga outra vez sem abanar para ver o TEMPO ESGOTADO.
 6. No terminal escreve `h`, `1`, `3`, `r` e `j`.
 7. Durante o jogo, o LED PB0 deve brilhar mais à medida que a barra enche.
 
-Estado: a lógica foi compilada e simulada no PC com cabeçalhos falsos; falta confirmar na placa as posições do texto no LCD (sobretudo as caixas do menu, com texto em tamanho 2), as interrupções (no terminal, `DMA_desc` deve ficar a 0 e o número do bloco deve subir cerca de 6 vezes por segundo) e se o LED PB0 é ativo a 1 (se acender ao contrário, pôr `LED_ATIVO_ALTO` a `0U`).
+Estado: a lógica foi compilada e simulada no PC com cabeçalhos falsos; falta confirmar na placa as posições do texto no LCD (sobretudo o menu, com texto em tamanho 2), as interrupções (no terminal, `DMA_desc` deve ficar a 0 e o número do bloco deve subir cerca de 6 vezes por segundo) e se o LED PB0 é ativo a 1 (se acender ao contrário, pôr `LED_ATIVO_ALTO` a `0U`).

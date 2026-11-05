@@ -127,9 +127,9 @@
 #define BOTAO_SEGURAR_BLOCOS  6U  // 6 x 160 ms = ~1 s
 #define BOTAO_DEBOUNCE_BLOCOS 2U  // ignora ressaltos durante 320 ms
 
-// Menu: uma linha de texto por nivel.
-#define MENU_LINHA_Y0        44U
-#define MENU_LINHA_PASSO     26U
+// Menu: uma linha por nivel (texto em tamanho 2 = 16 px de altura).
+#define MENU_Y0              40U
+#define MENU_PASSO           28U
 
 // Zonas de cor da barra (em pixeis): verde, amarelo, vermelho.
 #define BARRA_ZONA_AMARELA   40U
@@ -665,7 +665,7 @@ static void MostraEstado(const char *texto, uint16_t cor)
 // Cronometro centrado no topo: "TEMPO: 05.4 s".
 static void MostraCronometro(void)
 {
-    char texto[16];
+    char texto[20];
     uint32_t decimas = (tempo_jogo_blocos * JOGO_MS_POR_BLOCO) / 100U;
 
     snprintf(texto, sizeof(texto), "TEMPO: %02lu.%lu s",
@@ -704,31 +704,41 @@ static void DesenhaCabecalho(void)
 // =====================================================
 // MENU INICIAL (pagina a parte)
 // =====================================================
-// Uma linha por nivel: o escolhido fica com "> " e a cor do nivel,
-// os outros a cinzento.
+// Uma linha por nivel. O escolhido aparece na sua cor e com "> <";
+// os outros ficam a cinzento.
 static void DesenhaOpcoes(void)
 {
     for (uint8_t i = 0U; i < NUM_DIFICULDADES; i++)
     {
-        uint8_t y = (uint8_t)(MENU_LINHA_Y0 + i * MENU_LINHA_PASSO);
-        uint16_t cor = (i == dificuldade) ? cor_dificuldade[i] : LCD_CINZA;
+        uint8_t y = (uint8_t)(MENU_Y0 + i * MENU_PASSO);
+        const char *nome = nome_dificuldade[i];
+        uint8_t n = Comprimento(nome);
 
-        // Tamanho 2: cada caracter ocupa 12 px de largura e 16 px de altura.
+        // O texto em tamanho 2 nao apaga o fundo: limpar a linha primeiro.
         lcd_draw_fillrect(0U, y, 128U, 16U, LCD_PRETO);
+
         if (i == dificuldade)
         {
-            lcd_draw_string(16U, y, (unsigned char *)">", cor, 2U);
+            lcd_draw_string((uint8_t)(64U - n * 6U - 14U), y,
+                            (unsigned char *)">", cor_dificuldade[i], 2U);
+            lcd_draw_string((uint8_t)(64U - n * 6U), y,
+                            (unsigned char *)nome, cor_dificuldade[i], 2U);
         }
-        lcd_draw_string(34U, y, (unsigned char *)nome_dificuldade[i], cor, 2U);
+        else
+        {
+            lcd_draw_string((uint8_t)(64U - n * 6U), y,
+                            (unsigned char *)nome, LCD_CINZA, 2U);
+        }
     }
 }
 
+// Pagina inicial: titulo, os tres niveis e uma dica.
 static void DesenhaMenu(void)
 {
     lcd_draw_fillrect(0U, 0U, 128U, 160U, LCD_PRETO);
     DesenhaCabecalho();
     DesenhaOpcoes();
-    lcd_draw_string(13U, 140U, (unsigned char *)"SEGURA 1s = JOGAR",
+    lcd_draw_string(16U, 140U, (unsigned char *)"SEGURA SW5: JOGAR",
                     LCD_CINZA, 1U);
 }
 
@@ -957,14 +967,6 @@ static void DesenhaExplosao(void)
     // Tamanho 2: cada caracter ocupa 12 px -> "POP!" = 48 px.
     lcd_draw_string((uint8_t)(BALAO_CX - 23U), (uint8_t)(BALAO_CY - 7U),
                     (unsigned char *)"POP!", LCD_BRANCO, 2U);
-}
-
-// Apaga toda a zona do balao (usado depois da explosao).
-static void LimpaZonaBalao(void)
-{
-    lcd_draw_fillrect(0U, (uint8_t)(BALAO_LINHA_INICIAL - 4U), 128U,
-                      (uint8_t)(BALAO_CORDA_FIM - BALAO_LINHA_INICIAL + 6U),
-                      LCD_PRETO);
 }
 
 // Desenha um balao pequeno, com corda e brilho (inicio de cada jogo).
