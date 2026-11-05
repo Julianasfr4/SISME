@@ -1,67 +1,52 @@
 /**
-
  * Trabalho Final SISEM
-
- * Sistema de Aquisicao e Analise de Vibracoes
-
+ * Juliana Rodrigues 1231182
+ * Ema Mota
  *
-
- * VERSAO JOGO - ADC + DMA + TIM3 + LCD + DESAFIO DO BALAO
-
- *
-
+ * Sistema de Aquisição e Análise de Vibrações
+ * VERSÃO JOGO - ADC + DMA (com interrupção) + TIM3 + LCD + DESAFIO DO BALÃO
+ * 
  * STM32F103RBT6
-
  * ADXL337:
-
  *   X -> PC2 -> ADC1_IN12
-
  *   Y -> PC1 -> ADC1_IN11
-
  *   Z -> PC0 -> ADC1_IN10
-
  *
-
- * DESAFIO DO BALAO:
-
- *   1) Placa parada: aparece "ABANA P/ JOGAR".
-
- *   2) Abanar (Med5 >= 120 mg) inicia o cronometro.
-
- *   3) Objetivo: rebentar o balao no menor tempo possivel (max. 20 s).
-
- *   4) O melhor tempo fica guardado como recorde (RAM).
-
- *   A aquisicao (ADC/DMA/TIM3) e os calculos (RMS, Med5) nao mudaram.
-
+ * Funcionamento do Jogo:
+ *   1) Ecrã inicial (menu): escolher FÁCIL, NORMAL ou DIFÍCIL.
+ *      SW5: clique muda o nível; segurar 1 s começa o desafio.
+ *   2) Contagem 3, 2, 1 e depois "VAI! ABANA!": o cronómetro começa.
+ *   3) Objetivo: rebentar o balão no menor tempo possível (máx. 20 s).
+ *   4) No fim (POP ou tempo esgotado) volta ao menu.
+ *
+ * Extras implementados:
+ *   - SW5 (PA1, EXTI1): navega no menu (FÁCIL/NORMAL/DIFÍCIL = 300/500/700 mg).
+ *   - Terminal (USART2 RX): 'h' ajuda, '1'/'2'/'3' nível, 'j' jogar, 'r' apaga recordes.
+ *   - LED PB0 (TIM3_CH3 em PWM): brilho proporcional ao enchimento da barra.
+ *   - LED PB1: acende quando o balão rebenta.
  */
 
 #include "stm32f10x.h"
-
 #include "lcd.h"
-
 #include <stdio.h>
-
 #include <math.h>
 
 #define AMOSTRAS_BLOCO 32U
 #define ELEMENTOS_MEIO_DMA (AMOSTRAS_BLOCO * 3U)
-// Reduz a ocupacao da USART a 9600 bps; os eventos LCD/REBOU sao sempre escritos.
-#define USART_LOG_CADA_BLOCOS 2U
+#define USART_LOG_CADA_BLOCOS 2U // Enviar dados para a USART de 2 em 2 blocos
 
-// Visualizacao: barra + balao com subida moderada e descida lenta.
-// A escala grafica e o limiar de rebentamento sao configuracoes diferentes.
+// Parâmetros da barra no LCD
 #define BARRA_X                   12U
 #define BARRA_Y                   73U
 #define BARRA_LARGURA            104U
 #define BARRA_ALTURA               8U
-#define BARRA_RMS_MAX_MG        500U
-#define BARRA_RUIDO_REPOUSO_MG   35U
-#define BARRA_PERIODO_BLOCOS      2U  // 2 x 160 ms = 320 ms (jogo mais fluido)
+#define BARRA_RUIDO_REPOUSO_MG   35U // ruído com a placa parada
+#define BARRA_PERIODO_BLOCOS      2U // atualiza de 2 em 2 blocos (320 ms)
 #define BARRA_DELTA_MIN_PX        3U
-#define BARRA_PASSO_SUBIDA_PX    12U
-#define BARRA_PASSO_DESCIDA_PX    5U  // Descida intencionalmente mais lenta
+#define BARRA_PASSO_SUBIDA_PX    12U // subida da barra
+#define BARRA_PASSO_DESCIDA_PX    5U // descida da barra
 
+// Parâmetros do balão no LCD
 #define BALAO_CX                 64U
 #define BALAO_CY                112U
 #define BALAO_RAIO_MIN            7U
@@ -71,816 +56,675 @@
 #define BALAO_ALT_FAIXA          4U
 #define BALAO_CORDA_FIM        154U
 
-// Niveis de vibracao em mg (MED5), com histerese para nao oscilar no limite.
+// Limiares de vibração em mg
 #define NIVEL_MEDIA_ENTRA_MG    120U
 #define NIVEL_MEDIA_SAI_MG       95U
 #define NIVEL_ALTA_ENTRA_MG     260U
 #define NIVEL_ALTA_SAI_MG       230U
 
-// Rebenta apenas quando a MEDIANA ultrapassa 500 mg em 3 blocos seguidos.
-#define LIMIAR_REBENTAMENTO_MG  500U
-#define REBENTAMENTO_BLOCOS       3U
+// Condições de rebentamento do balão
+#define REBENTAMENTO_BLOCOS       3U // blocos seguidos acima do limiar
+#define REBOU_DURACAO_BLOCOS     16U // tempo de espera após rebentar (~2.6 s)
 
-// Mostrar o rebentamento (ou o fim do tempo) durante 16 blocos (~2,6 s).
-// Apos esse periodo, o jogo volta ao ecra de espera.
-#define REBOU_DURACAO_BLOCOS     16U
+#define LED_ATIVO_ALTO            1U // 1 = ativo a nível alto
 
-// Evitar rebentamentos repetidos enquanto a vibracao continua muito alta.
-// Um novo rebentamento fica disponivel depois de Med5 descer ate 95 mg.
-#define REARME_AUTOMATICO_MG     95U
-
-// PB1: LED do rebentamento. Se for ativo a zero, usar 0U.
-#define LED_ATIVO_ALTO            1U
+// Cores em RGB565 (com ajuste BGR para o ecrã da placa 3SO)
+#define LCD_ORDEM_BGR 1U
 
 #define LCD_PRETO  0x0000U
 #define LCD_BRANCO 0xFFFFU
 #define LCD_VERDE  0x07E0U
-#define LCD_VERMELHO 0xF800U
 #define LCD_CINZA  0xC618U
-#define LCD_AMARELO 0xFFE0U
-#define LCD_AZUL   0x001FU
-#define LCD_CIANO  0x07FFU
-#define LCD_LARANJA 0xFD20U
+#if LCD_ORDEM_BGR
+#define LCD_VERMELHO 0x001FU
+#define LCD_AMARELO  0x07FFU
+#define LCD_AZUL     0xF800U
+#define LCD_CIANO    0xFFE0U
+#define LCD_LARANJA  0x053FU
+#else
+#define LCD_VERMELHO 0xF800U
+#define LCD_AMARELO  0xFFE0U
+#define LCD_AZUL     0x001FU
+#define LCD_CIANO    0x07FFU
+#define LCD_LARANJA  0xFD20U
+#endif
 
-// =====================================================
-// JOGO: DESAFIO DO BALAO
-// =====================================================
-#define JOGO_ESPERA   0U   // a espera que a placa seja abanada
-#define JOGO_ATIVO    1U   // cronometro a contar
-#define JOGO_REBOU    2U   // balao rebentou: mostra o tempo
-#define JOGO_FIM      3U   // tempo esgotado sem rebentar
+// Estados do jogo
+#define JOGO_MENU     0U // ecrã inicial: escolher o nível
+#define JOGO_ATIVO    1U // cronómetro a contar
+#define JOGO_REBOU    2U // balão rebentou (mostra o tempo)
+#define JOGO_FIM      3U // tempo esgotado (20 segundos)
+#define JOGO_CONTAGEM 4U // contagem 3, 2, 1 antes de começar
 
-#define JOGO_LIMITE_BLOCOS  125U  // 125 x 160 ms = 20 s
-#define JOGO_MS_POR_BLOCO   160U  // 32 amostras / 200 Hz
-#define JOGO_INICIO_MG      NIVEL_MEDIA_ENTRA_MG
+#define JOGO_LIMITE_BLOCOS  125U // 125 * 160 ms = 20 s
+#define JOGO_MS_POR_BLOCO   160U // 32 amostras / 200 Hz = 160 ms
+#define CONTAGEM_BLOCOS      18U // 3 x 6 blocos = ~3 s
+#define CONTAGEM_PASSO        6U // ~1 s por número
 
-// Zonas de cor da barra (em pixeis): verde, amarelo, vermelho.
+// Parâmetros do botão SW5
+#define BOTAO_SEGURAR_BLOCOS  6U // 6 x 160 ms = ~1 s para começar o jogo
+#define BOTAO_DEBOUNCE_BLOCOS 2U // debounce de 320 ms
+
+// Posições no menu e ecrã
+#define MENU_Y0              36U  // primeira opção do menu
+#define MENU_PASSO           26U  // espaçamento entre opções
+#define MENU_REC_X           31U  // x do recorde no menu
+#define MENU_REC_Y          114U // y do recorde no menu
+#define MENU_VALOR_Y         128U // y da leitura do sensor no menu
+#define MENU_RODAPE_Y        142U // y da mensagem segura SW5
+
+#define JOGO_REC_X           58U  // x do recorde no jogo
+#define JOGO_INFO_Y          53U  // y da dificuldade e recorde no jogo
+#define JOGO_VALOR_Y         41U  // y do valor em mg e g no jogo
+#define ESTADO_Y             29U  // y da mensagem de estado (VAI! ABANA!)
+#define TEMPO_Y              19U  // y do cronómetro
+
+// Zonas de cor da barra
 #define BARRA_ZONA_AMARELA   40U
 #define BARRA_ZONA_VERMELHA  75U
 
-// Linha de texto de estado (por baixo do cabecalho).
-#define ESTADO_Y             33U
-#define TEMPO_Y              22U
-
-// 2 metades, 32 amostras por metade, 3 eixos
-
+// Buffer do DMA (2 metades x 32 amostras x 3 eixos)
 volatile uint16_t adc_buffer[2][AMOSTRAS_BLOCO][3];
-// Numero de metades DMA rejeitadas por terem sido alcancadas pela escrita.
+
+// Flags de metades prontas do DMA (bit 0 = HT, bit 1 = TC)
+volatile uint8_t dma_metade_pronta = 0U;
 static uint32_t blocos_dma_descartados = 0U;
 
 // =====================================================
-
-// RCC - 72 MHz
-
+// Configuração do Clock: HSE + PLL para 72 MHz
 // =====================================================
-
-void RCC_Config_HSE_PLL_Max(void)
-
-{
+void RCC_Config_HSE_PLL_Max(void) {
 
     RCC_DeInit();
 
-    RCC_HSEConfig(RCC_HSE_ON);
+    RCC_HSEConfig(RCC_HSE_ON); // ativar o HSE
 
-    if (RCC_WaitForHSEStartUp() == SUCCESS)
-
+    ErrorStatus HSEStartUpStatus;
+    HSEStartUpStatus = RCC_WaitForHSEStartUp();
+    if (HSEStartUpStatus == SUCCESS) /* devolve SUCCESS/ERROR */
     {
-
-        FLASH_SetLatency(FLASH_Latency_2);
-
+        FLASH_SetLatency(FLASH_Latency_2); // freq é 72 MHz
         FLASH_PrefetchBufferCmd(FLASH_PrefetchBuffer_Enable);
 
-        RCC_HCLKConfig(RCC_SYSCLK_Div1);
+        RCC_HCLKConfig(RCC_SYSCLK_Div1); // AHB a 72 MHz
+        RCC_PCLK1Config(RCC_HCLK_Div2);  // APB1 a 36 MHz (máximo suportado)
+        RCC_PCLK2Config(RCC_HCLK_Div1);  // APB2 a 72 MHz
 
-        RCC_PCLK1Config(RCC_HCLK_Div2);
+        RCC_PLLConfig(RCC_PLLSource_HSE_Div1, RCC_PLLMul_6); // 12 MHz * 6 = 72 MHz
 
-        RCC_PCLK2Config(RCC_HCLK_Div1);
+        RCC_PLLCmd(ENABLE); // ativa-se o PLL
+        while (RCC_GetFlagStatus(RCC_FLAG_PLLRDY) == RESET); // esperar que a PLL arranque
 
-        RCC_PLLConfig(RCC_PLLSource_HSE_Div1, RCC_PLLMul_6);
-
-        RCC_PLLCmd(ENABLE);
-
-        while (RCC_GetFlagStatus(RCC_FLAG_PLLRDY) == RESET);
-
-        RCC_SYSCLKConfig(RCC_SYSCLKSource_PLLCLK);
-
-        while (RCC_GetSYSCLKSource() != 0x08);
-
+        RCC_SYSCLKConfig(RCC_SYSCLKSource_PLLCLK); // configurar o PLL como clock
+        while (RCC_GetSYSCLKSource() != 0x08);     // esperar que estabilize o PLL
     }
-
-    else
-
-    {
-
+    else {
         while (1);
-
     }
-
 }
 
 // =====================================================
-
-// USART2 - 9600 bps
-
+// Configuração da USART2 a 9600 bps com Interrupção de Recepção
 // =====================================================
+void USART2_Config(void) {
 
-void USART2_Config(void)
-
-{
-
-    GPIO_InitTypeDef GPIO_InitStructure;
-
-    USART_InitTypeDef USART_InitStructure;
-
+    // Ativar clocks do GPIOA e da USART2
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE);
-
     RCC_APB1PeriphClockCmd(RCC_APB1Periph_USART2, ENABLE);
 
-    // PA2 - TX
-
-    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_2;
-
-    GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
-
-    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP;
-
-    GPIO_Init(GPIOA, &GPIO_InitStructure);
-
-    // PA3 - RX
-
-    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_3;
-
-    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IN_FLOATING;
-
-    GPIO_Init(GPIOA, &GPIO_InitStructure);
-
-    USART_InitStructure.USART_BaudRate = 9600;
-
-    USART_InitStructure.USART_WordLength = USART_WordLength_8b;
-
-    USART_InitStructure.USART_StopBits = USART_StopBits_1;
-
-    USART_InitStructure.USART_Parity = USART_Parity_No;
-
-    USART_InitStructure.USART_HardwareFlowControl =
-
-        USART_HardwareFlowControl_None;
-
-    USART_InitStructure.USART_Mode =
-
-        USART_Mode_Rx | USART_Mode_Tx;
-
-    USART_Init(USART2, &USART_InitStructure);
-
-    USART_Cmd(USART2, ENABLE);
-
-}
-
-// =====================================================
-
-// ENVIAR TEXTO PELA USART2
-
-// =====================================================
-
-void USART2_EnviaTexto(const char *texto)
-
-{
-
-    while (*texto != '\0')
-
-    {
-
-        while (USART_GetFlagStatus(USART2, USART_FLAG_TXE)
-
-               == RESET);
-
-        USART_SendData(USART2, (uint16_t)*texto);
-
-        texto++;
-
-    }
-
-    while (USART_GetFlagStatus(USART2, USART_FLAG_TC)
-
-           == RESET);
-
-}
-
-// =====================================================
-
-// ADC1 + DMA1
-
-// =====================================================
-
-void ADC1_DMA_Config(void)
-
-{
-
     GPIO_InitTypeDef GPIO_InitStructure;
 
-    ADC_InitTypeDef ADC_InitStructure;
+    // Configurar pino PA2 (TX)
+    GPIO_InitStructure.GPIO_Pin   = GPIO_Pin_2;
+    GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+    GPIO_InitStructure.GPIO_Mode  = GPIO_Mode_AF_PP; // saída alternativa Push-Pull
+    GPIO_Init(GPIOA, &GPIO_InitStructure);
 
-    DMA_InitTypeDef DMA_InitStructure;
+    // Configurar pino PA3 (RX)
+    GPIO_InitStructure.GPIO_Pin  = GPIO_Pin_3;
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IN_FLOATING; // entrada flutuante
+    GPIO_Init(GPIOA, &GPIO_InitStructure);
 
-    // 1. Ativar clocks
+    // Parâmetros da USART2: 9600 bps, 8 bits, 1 stop bit, sem paridade
+    USART_InitTypeDef USART_InitStructure;
+    USART_InitStructure.USART_BaudRate            = 9600;
+    USART_InitStructure.USART_WordLength          = USART_WordLength_8b;
+    USART_InitStructure.USART_StopBits            = USART_StopBits_1;
+    USART_InitStructure.USART_Parity              = USART_Parity_No;
+    USART_InitStructure.USART_HardwareFlowControl = USART_HardwareFlowControl_None;
+    USART_InitStructure.USART_Mode                = USART_Mode_Rx | USART_Mode_Tx;
+    USART_Init(USART2, &USART_InitStructure);
 
-    RCC_APB2PeriphClockCmd(
+    USART_ITConfig(USART2, USART_IT_RXNE, ENABLE); // ativar interrupção de recepção (RXNE)
 
-        RCC_APB2Periph_GPIOC | RCC_APB2Periph_ADC1,
+    USART_Cmd(USART2, ENABLE); // ativar a USART2
+}
 
-        ENABLE
+// Envia uma string de texto pela USART2
+void USART2_EnviaTexto(const char *texto) {
 
-    );
+    while (*texto != '\0') {
+        while (USART_GetFlagStatus(USART2, USART_FLAG_TXE) == RESET); // esperar por TX vazio
+        USART_SendData(USART2, (uint16_t)*texto); // enviar caracter
+        texto++;
+    }
+    while (USART_GetFlagStatus(USART2, USART_FLAG_TC) == RESET); // esperar pelo fim da transmissão
+}
 
+// =====================================================
+// Configuração do ADC1 com DMA1 e trigger no TIM3
+// =====================================================
+void ADC1_DMA_Config(void) {
+
+    // Ativar clocks do GPIOC, ADC1 e DMA1
+    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOC | RCC_APB2Periph_ADC1, ENABLE);
     RCC_AHBPeriphClockCmd(RCC_AHBPeriph_DMA1, ENABLE);
 
-    // ADC = 72 MHz / 6 = 12 MHz
+    RCC_ADCCLKConfig(RCC_PCLK2_Div6); // 72 MHz / 6 = 12 MHz
 
-    RCC_ADCCLKConfig(RCC_PCLK2_Div6);
-
-    // 2. Entradas analogicas PC0, PC1 e PC2
-
-    GPIO_InitStructure.GPIO_Pin =
-
-        GPIO_Pin_0 | GPIO_Pin_1 | GPIO_Pin_2;
-
-    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AIN;
-
+    // Configurar pinos PC0, PC1 e PC2 como entradas analógicas
+    GPIO_InitTypeDef GPIO_InitStructure;
+    GPIO_InitStructure.GPIO_Pin   = GPIO_Pin_0 | GPIO_Pin_1 | GPIO_Pin_2;
+    GPIO_InitStructure.GPIO_Mode  = GPIO_Mode_AIN; // entrada analógica
     GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
-
     GPIO_Init(GPIOC, &GPIO_InitStructure);
 
-    // 3. Configurar DMA
-
+    // Configuração do Canal 1 do DMA1
     DMA_DeInit(DMA1_Channel1);
-
-    DMA_InitStructure.DMA_PeripheralBaseAddr =
-
-        (uint32_t)&ADC1->DR;
-
-    DMA_InitStructure.DMA_MemoryBaseAddr =
-
-        (uint32_t)&adc_buffer[0][0][0];
-
-    DMA_InitStructure.DMA_DIR =
-
-        DMA_DIR_PeripheralSRC;
-
-    // 2 blocos x 32 amostras x 3 eixos
-
-    DMA_InitStructure.DMA_BufferSize =
-
-        2 * AMOSTRAS_BLOCO * 3;
-
-    DMA_InitStructure.DMA_PeripheralInc =
-
-        DMA_PeripheralInc_Disable;
-
-    DMA_InitStructure.DMA_MemoryInc =
-
-        DMA_MemoryInc_Enable;
-
-    DMA_InitStructure.DMA_PeripheralDataSize =
-
-        DMA_PeripheralDataSize_HalfWord;
-
-    DMA_InitStructure.DMA_MemoryDataSize =
-
-        DMA_MemoryDataSize_HalfWord;
-
-    // Agora o DMA funciona continuamente
-
-    DMA_InitStructure.DMA_Mode =
-
-        DMA_Mode_Circular;
-
-    DMA_InitStructure.DMA_Priority =
-
-        DMA_Priority_High;
-
-    DMA_InitStructure.DMA_M2M =
-
-        DMA_M2M_Disable;
-
+    DMA_InitTypeDef DMA_InitStructure;
+    DMA_InitStructure.DMA_PeripheralBaseAddr = (uint32_t)&ADC1->DR; // registo de dados do ADC1
+    DMA_InitStructure.DMA_MemoryBaseAddr     = (uint32_t)&adc_buffer[0][0][0]; // buffer na memória RAM
+    DMA_InitStructure.DMA_DIR                = DMA_DIR_PeripheralSRC; // periférico é a fonte
+    DMA_InitStructure.DMA_BufferSize         = 2 * AMOSTRAS_BLOCO * 3; // 2 metades x 32 amostras x 3 canais
+    DMA_InitStructure.DMA_PeripheralInc      = DMA_PeripheralInc_Disable; // não incrementa periférico
+    DMA_InitStructure.DMA_MemoryInc          = DMA_MemoryInc_Enable; // incrementa endereço de memória
+    DMA_InitStructure.DMA_PeripheralDataSize = DMA_PeripheralDataSize_HalfWord; // 16 bits
+    DMA_InitStructure.DMA_MemoryDataSize     = DMA_MemoryDataSize_HalfWord; // 16 bits
+    DMA_InitStructure.DMA_Mode               = DMA_Mode_Circular; // modo circular
+    DMA_InitStructure.DMA_Priority           = DMA_Priority_High; // prioridade alta
+    DMA_InitStructure.DMA_M2M                = DMA_M2M_Disable;
     DMA_Init(DMA1_Channel1, &DMA_InitStructure);
 
-    // 4. Configurar ADC
+    DMA_ITConfig(DMA1_Channel1, DMA_IT_HT | DMA_IT_TC, ENABLE); // ativar interrupções HT e TC
 
+    // Configuração do ADC1
     ADC_DeInit(ADC1);
-
-    ADC_InitStructure.ADC_Mode =
-
-        ADC_Mode_Independent;
-
-    ADC_InitStructure.ADC_ScanConvMode =
-
-        ENABLE;
-
-    ADC_InitStructure.ADC_ContinuousConvMode =
-
-        DISABLE;
-
-    // NOVO: o ADC e desencadeado pelo TIM3
-
-    ADC_InitStructure.ADC_ExternalTrigConv =
-
-        ADC_ExternalTrigConv_T3_TRGO;
-
-    ADC_InitStructure.ADC_DataAlign =
-
-        ADC_DataAlign_Right;
-
-    ADC_InitStructure.ADC_NbrOfChannel = 3;
-
+    ADC_InitTypeDef ADC_InitStructure;
+    ADC_InitStructure.ADC_Mode               = ADC_Mode_Independent; // modo independente
+    ADC_InitStructure.ADC_ScanConvMode       = ENABLE; // modo scan
+    ADC_InitStructure.ADC_ContinuousConvMode = DISABLE; // conversão não contínua
+    ADC_InitStructure.ADC_ExternalTrigConv   = ADC_ExternalTrigConv_T3_TRGO; // trigger externo pelo TIM3 (TRGO)
+    ADC_InitStructure.ADC_DataAlign          = ADC_DataAlign_Right; // alinhamento à direita
+    ADC_InitStructure.ADC_NbrOfChannel       = 3; // 3 canais
     ADC_Init(ADC1, &ADC_InitStructure);
 
-    // 5. Configurar a sequencia X, Y, Z
+    // Sequência dos canais: X (CH12), Y (CH11), Z (CH10)
+    ADC_RegularChannelConfig(ADC1, ADC_Channel_12, 1, ADC_SampleTime_239Cycles5);
+    ADC_RegularChannelConfig(ADC1, ADC_Channel_11, 2, ADC_SampleTime_239Cycles5);
+    ADC_RegularChannelConfig(ADC1, ADC_Channel_10, 3, ADC_SampleTime_239Cycles5);
 
-    ADC_RegularChannelConfig(
+    ADC_DMACmd(ADC1, ENABLE); // ligar DMA ao ADC1
+    ADC_Cmd(ADC1, ENABLE);    // ativar o ADC1
 
-        ADC1,
-
-        ADC_Channel_12,
-
-        1,
-
-        ADC_SampleTime_239Cycles5
-
-    );
-
-    ADC_RegularChannelConfig(
-
-        ADC1,
-
-        ADC_Channel_11,
-
-        2,
-
-        ADC_SampleTime_239Cycles5
-
-    );
-
-    ADC_RegularChannelConfig(
-
-        ADC1,
-
-        ADC_Channel_10,
-
-        3,
-
-        ADC_SampleTime_239Cycles5
-
-    );
-
-    // 6. Ativar ADC
-
-    ADC_DMACmd(ADC1, ENABLE);
-
-    ADC_Cmd(ADC1, ENABLE);
-
-    // 7. Calibracao
-
+    // Calibração do ADC1
     ADC_ResetCalibration(ADC1);
-
-    while (ADC_GetResetCalibrationStatus(ADC1));
+    while (ADC_GetResetCalibrationStatus(ADC1)); // esperar reset da calibração
 
     ADC_StartCalibration(ADC1);
+    while (ADC_GetCalibrationStatus(ADC1)); // esperar fim da calibração
 
-    while (ADC_GetCalibrationStatus(ADC1));
-
-    // NOVO: permitir o trigger externo
-
-    ADC_ExternalTrigConvCmd(ADC1, ENABLE);
-
+    ADC_ExternalTrigConvCmd(ADC1, ENABLE); // ativar trigger externo
 }
 
 // =====================================================
+// Configuração das Interrupções no NVIC
+// =====================================================
+void NVIC_Config(void) {
 
-// TIM3 - FREQUENCIA DE AMOSTRAGEM 200 Hz
+    NVIC_PriorityGroupConfig(NVIC_PriorityGroup_1); // 1 bit de preempção, 3 de sub-prioridade
+
+    NVIC_InitTypeDef NVIC_InitStructure;
+
+    // Interrupção do DMA1 Canal 1 (máxima prioridade)
+    NVIC_InitStructure.NVIC_IRQChannel                   = DMA1_Channel1_IRQn;
+    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0;
+    NVIC_InitStructure.NVIC_IRQChannelSubPriority        = 0;
+    NVIC_InitStructure.NVIC_IRQChannelCmd                = ENABLE;
+    NVIC_Init(&NVIC_InitStructure);
+
+    // Interrupção do Botão SW5 (EXTI1)
+    NVIC_InitStructure.NVIC_IRQChannel                   = EXTI1_IRQn;
+    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 1;
+    NVIC_InitStructure.NVIC_IRQChannelSubPriority        = 0;
+    NVIC_InitStructure.NVIC_IRQChannelCmd                = ENABLE;
+    NVIC_Init(&NVIC_InitStructure);
+
+    // Interrupção da USART2 (recepção)
+    NVIC_InitStructure.NVIC_IRQChannel                   = USART2_IRQn;
+    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 1;
+    NVIC_InitStructure.NVIC_IRQChannelSubPriority        = 1;
+    NVIC_InitStructure.NVIC_IRQChannelCmd                = ENABLE;
+    NVIC_Init(&NVIC_InitStructure);
+}
 
 // =====================================================
+// Configuração do TIM3 para gerar 200 Hz
+// =====================================================
+void TIM3_Config_200Hz(void) {
 
-void TIM3_Config_200Hz(void)
-
-{
+    RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM3, ENABLE); // ativar clock do TIM3
 
     TIM_TimeBaseInitTypeDef TIM_TimeBaseStructure;
-
-    RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM3, ENABLE);
-
-    // TIM3 recebe 72 MHz:
-
-    // PSC = 7199 -> 10 kHz
-
-    // ARR = 49   -> 200 Hz
-
-    TIM_TimeBaseStructure.TIM_Prescaler = 7200 - 1;
-
-    TIM_TimeBaseStructure.TIM_Period = 50 - 1;
-
-    TIM_TimeBaseStructure.TIM_ClockDivision =
-
-        TIM_CKD_DIV1;
-
-    TIM_TimeBaseStructure.TIM_CounterMode =
-
-        TIM_CounterMode_Up;
-
+    TIM_TimeBaseStructure.TIM_Prescaler     = 7200 - 1; // 72 MHz / 7200 = 10 kHz
+    TIM_TimeBaseStructure.TIM_Period        = 50 - 1;   // 10 kHz / 50 = 200 Hz
+    TIM_TimeBaseStructure.TIM_ClockDivision = TIM_CKD_DIV1;
+    TIM_TimeBaseStructure.TIM_CounterMode   = TIM_CounterMode_Up; // contagem crescente
     TIM_TimeBaseInit(TIM3, &TIM_TimeBaseStructure);
 
-    // O evento de update produz o sinal TRGO
-
-    TIM_SelectOutputTrigger(TIM3, TIM_TRGOSource_Update);
-
-    // Ainda nao iniciamos o timer
-
+    TIM_SelectOutputTrigger(TIM3, TIM_TRGOSource_Update); // update gera sinal TRGO
 }
 
-// =====================================================
-// MEDIANA MOVEL DOS ULTIMOS 5 BLOCOS (RMS TOTAL EM mg)
-// Rejeita valores isolados altos e baixos.
-// Nao altera as amostras do ADC nem o calculo do RMS.
-// =====================================================
+// Filtro de mediana móvel dos últimos 5 blocos
+static uint32_t MedianaMovel5(uint32_t rms_atual_mg) {
 
-static uint32_t MedianaMovel5(uint32_t rms_atual_mg)
-{
     static uint32_t historico[5];
     static uint8_t posicao = 0U;
     static uint8_t inicializado = 0U;
     uint32_t ordenado[5];
 
-    // No arranque, evita usar zeros como se fossem amostras reais.
-    if (inicializado == 0U)
-    {
-        for (uint8_t i = 0U; i < 5U; i++)
-        {
+    if (inicializado == 0U) {
+        for (uint8_t i = 0U; i < 5U; i++) {
             historico[i] = rms_atual_mg;
         }
         inicializado = 1U;
     }
 
-    // Substituir a entrada mais antiga no buffer circular.
     historico[posicao] = rms_atual_mg;
     posicao = (uint8_t)((posicao + 1U) % 5U);
 
-    // Copia local para ordenar sem modificar a ordem temporal.
-    for (uint8_t i = 0U; i < 5U; i++)
-    {
+    for (uint8_t i = 0U; i < 5U; i++) {
         ordenado[i] = historico[i];
     }
 
-    // Ordenacao por insercao de apenas 5 numeros.
-    for (uint8_t i = 1U; i < 5U; i++)
-    {
+    // Ordenação por inserção
+    for (uint8_t i = 1U; i < 5U; i++) {
         uint32_t valor = ordenado[i];
         uint8_t j = i;
 
-        while ((j > 0U) && (ordenado[j - 1U] > valor))
-        {
+        while ((j > 0U) && (ordenado[j - 1U] > valor)) {
             ordenado[j] = ordenado[j - 1U];
             j--;
         }
         ordenado[j] = valor;
     }
 
-    return ordenado[2];
+    return ordenado[2]; // devolve o valor do meio
 }
 
-// =====================================================
-// BARRA + BALAO (desenho incremental)
-// =====================================================
-
+// Variáveis da animação e do jogo
 static void DesenhaCorda(uint8_t raio_antigo, uint8_t raio_novo);
 
-// Valores de animacao: NAO alteram os dados recolhidos pelo ADC.
 static uint8_t barra_visual_px = 0U;
 static uint8_t barra_desenhada_px = 0U;
 static uint8_t balao_raio_desenhado = 0U;
 static uint8_t contador_rebentamento = 0U;
 static uint8_t blocos_rebou = 0U;
-static uint8_t pode_rebentar = 1U;
+static uint8_t blocos_contagem = 0U;
 
-// Estado do jogo e cronometro (contados em blocos de 160 ms).
-static uint8_t estado_jogo = JOGO_ESPERA;
+static uint8_t estado_jogo = JOGO_MENU;
 static uint32_t tempo_jogo_blocos = 0U;
-static uint32_t recorde_blocos = 0U;   // 0 = ainda sem recorde
 
-// Estado do texto de intensidade, independente da velocidade do balao.
+// Níveis de dificuldade: Fácil, Normal, Difícil
+#define DIF_FACIL    0U
+#define DIF_NORMAL   1U
+#define DIF_DIFICIL  2U
+#define NUM_DIFICULDADES 3U
+static const uint32_t limiar_dificuldade_mg[NUM_DIFICULDADES] = {300U, 500U, 700U};
+static const char *nome_dificuldade[NUM_DIFICULDADES]         = {"FACIL", "NORMAL", "DIFICIL"};
+static const uint16_t cor_dificuldade[NUM_DIFICULDADES]       = {LCD_VERDE, LCD_AMARELO, LCD_VERMELHO};
+static uint8_t dificuldade = DIF_NORMAL;
+#define LIMIAR_ATUAL_MG  (limiar_dificuldade_mg[dificuldade])
+
+static uint32_t recorde_blocos[NUM_DIFICULDADES] = {0U, 0U, 0U}; // recordes por nível
+
+// Flags das interrupções
+volatile uint8_t botao_pressionado = 0U; // botão SW5 (EXTI1)
+volatile char comando_usart = 0;         // caracter recebido na USART2
+
 #define VIB_BAIXA 0U
 #define VIB_MEDIA 1U
 #define VIB_ALTA  2U
 static uint8_t nivel_vibracao = VIB_BAIXA;
 
-// Escreve uma mensagem centrada na linha de estado.
-static void MostraEstado(const char *texto, uint16_t cor)
-{
+// Escrever mensagem de estado no ecrã
+static void MostraEstado(const char *texto, uint16_t cor) {
+
     uint8_t n = 0U;
-    while ((texto[n] != '\0') && (n < 18U))
-    {
+    while ((texto[n] != '\0') && (n < 18U)) {
         n++;
     }
-    lcd_draw_fillrect(10U, 31U, 108U, 12U, LCD_PRETO);
-    lcd_draw_string((uint8_t)(64U - n * 3U), ESTADO_Y,
-                    (unsigned char *)texto, cor, 1U);
+    lcd_draw_fillrect(10U, (uint8_t)(ESTADO_Y - 1U), 108U, 10U, LCD_PRETO); // limpa a linha
+    lcd_draw_string((uint8_t)(64U - n * 3U), ESTADO_Y, (unsigned char *)texto, cor, 1U);
 }
 
-// Escreve um tempo em segundos com uma casa decimal: "T:05.4".
-// blocos == 0 com traco != 0 mostra "--.-" (recorde ainda vazio).
-static void EscreveTempo(uint8_t x, const char *rotulo,
-                         uint32_t blocos, uint8_t traco, uint16_t cor)
-{
-    char texto[12];
-    uint32_t decimas = (blocos * JOGO_MS_POR_BLOCO) / 100U;
+// Mostrar cronómetro no ecrã
+static void MostraCronometro(void) {
 
-    if ((blocos == 0U) && (traco != 0U))
-    {
-        snprintf(texto, sizeof(texto), "%s--.-", rotulo);
+    char texto[20];
+    uint32_t decimas = (tempo_jogo_blocos * JOGO_MS_POR_BLOCO) / 100U;
+
+    snprintf(texto, sizeof(texto), "TEMPO: %02lu.%lu s",
+             (unsigned long)(decimas / 10U),
+             (unsigned long)(decimas % 10U));
+    lcd_draw_string(25U, TEMPO_Y, (unsigned char *)texto, LCD_BRANCO, 1U);
+}
+
+// Devolve o comprimento de uma string
+static uint8_t Comprimento(const char *texto) {
+
+    uint8_t n = 0U;
+    while (texto[n] != '\0') {
+        n++;
     }
-    else
-    {
-        snprintf(texto, sizeof(texto), "%s%02lu.%lu", rotulo,
+    return n;
+}
+
+// Mostrar dificuldade no ecrã
+static void MostraDificuldade(void) {
+    lcd_draw_string(10U, JOGO_INFO_Y, (unsigned char *)nome_dificuldade[dificuldade], cor_dificuldade[dificuldade], 1U);
+}
+
+// Mostrar recorde no ecrã
+static void MostraRecorde(uint8_t x, uint8_t y) {
+
+    char texto[20];
+    uint32_t decimas = (recorde_blocos[dificuldade] * JOGO_MS_POR_BLOCO) / 100U;
+
+    if (recorde_blocos[dificuldade] == 0U) {
+        snprintf(texto, sizeof(texto), "REC: --.- s");
+    }
+    else {
+        snprintf(texto, sizeof(texto), "REC: %02lu.%lu s",
                  (unsigned long)(decimas / 10U),
                  (unsigned long)(decimas % 10U));
     }
-    lcd_draw_string(x, TEMPO_Y, (unsigned char *)texto, cor, 1U);
+    lcd_draw_string(x, y, (unsigned char *)texto, LCD_CIANO, 1U);
 }
 
-static void MostraCronometro(void)
-{
-    EscreveTempo(10U, "T:", tempo_jogo_blocos, 0U, LCD_BRANCO);
+// Desenhar cabeçalho comum a todas as páginas
+static void DesenhaCabecalho(void) {
+    lcd_draw_string(16U, 6U, (unsigned char *)"DESAFIO DO BALAO", LCD_AMARELO, 1U);
+    lcd_draw_fillrect(10U, 16U, 108U, 1U, LCD_LARANJA);
 }
 
-static void MostraRecorde(void)
-{
-    EscreveTempo(70U, "REC:", recorde_blocos, 1U, LCD_CIANO);
+// Desenhar as opções no menu
+static void DesenhaOpcoes(void) {
+
+    for (uint8_t i = 0U; i < NUM_DIFICULDADES; i++) {
+        uint8_t y = (uint8_t)(MENU_Y0 + i * MENU_PASSO);
+        const char *nome = nome_dificuldade[i];
+        uint8_t n = Comprimento(nome);
+
+        lcd_draw_fillrect(0U, y, 128U, 16U, LCD_PRETO); // limpa linha
+
+        if (i == dificuldade) {
+            lcd_draw_string((uint8_t)(64U - n * 6U - 14U), y, (unsigned char *)">", LCD_BRANCO, 2U);
+        }
+        lcd_draw_string((uint8_t)(64U - n * 6U), y, (unsigned char *)nome, LCD_BRANCO, 2U);
+    }
+
+    MostraRecorde(MENU_REC_X, MENU_REC_Y); // mostra o recorde do nível selecionado
 }
 
-// Escreve apenas quando ha uma mudanca de nivel (pouco trafego SPI).
-static void MostraNivelNoLCD(uint8_t nivel)
-{
+// Desenhar página inicial do menu
+static void DesenhaMenu(void) {
+
+    lcd_draw_fillrect(0U, 0U, 128U, 160U, LCD_PRETO);
+    DesenhaCabecalho();
+    DesenhaOpcoes();
+    lcd_draw_string(16U, MENU_RODAPE_Y, (unsigned char *)"SEGURA SW5: JOGAR", LCD_CINZA, 1U);
+}
+// Cor da aceleração de acordo com o nível
+static uint16_t CorPorVibracao(uint32_t valor_mg) {
+
+    if (valor_mg >= NIVEL_ALTA_ENTRA_MG)  return LCD_VERMELHO; // nível alto (>260 mg)
+    if (valor_mg >= NIVEL_MEDIA_ENTRA_MG) return LCD_AMARELO;  // nível médio (>120 mg)
+    return LCD_VERDE;                                          // repouso / baixo
+}
+
+// Mostrar valor da aceleração em mg e g durante o jogo
+static void MostraValorJogo(uint32_t valor_mg) {
+
+    char texto[32];
+    uint8_t n;
+    uint32_t int_g = valor_mg / 1000U;
+    uint32_t dec_g = (valor_mg % 1000U) / 10U; // centésimas de g
+    uint16_t cor   = CorPorVibracao(valor_mg);
+
+    snprintf(texto, sizeof(texto), "VIB: %lu mg (%lu.%02lu g)",
+             (unsigned long)valor_mg,
+             (unsigned long)int_g,
+             (unsigned long)dec_g);
+
+    n = Comprimento(texto);
+    lcd_draw_fillrect(2U, (uint8_t)(JOGO_VALOR_Y - 1U), 124U, 10U, LCD_PRETO); // limpa a linha
+    lcd_draw_string((uint8_t)((128U - n * 6U) / 2U), JOGO_VALOR_Y, (unsigned char *)texto, cor, 1U); // centra o texto
+}
+
+// Mostrar valor do sensor no menu inicial
+static void MostraValorMenu(uint32_t valor_mg) {
+
+    char texto[32];
+    uint8_t n;
+    uint32_t int_g = valor_mg / 1000U;
+    uint32_t dec_g = (valor_mg % 1000U) / 10U; // centésimas de g
+
+    snprintf(texto, sizeof(texto), "SENS: %lu mg (%lu.%02lu g)",
+             (unsigned long)valor_mg,
+             (unsigned long)int_g,
+             (unsigned long)dec_g);
+
+    n = Comprimento(texto);
+    lcd_draw_fillrect(2U, (uint8_t)(MENU_VALOR_Y - 1U), 124U, 10U, LCD_PRETO); // limpa a linha
+    lcd_draw_string((uint8_t)((128U - n * 6U) / 2U), MENU_VALOR_Y, (unsigned char *)texto, LCD_CIANO, 1U); // centra o texto
+}
+
+// Mostrar nível de vibração no ecrã
+static void MostraNivelNoLCD(uint8_t nivel) {
+
     const char *texto;
     uint16_t cor;
-    if (nivel == VIB_ALTA)
-    {
+
+    if (nivel == VIB_ALTA) {
         texto = "VIB: ALTA";
-        cor = LCD_VERMELHO;
+        cor   = LCD_VERMELHO;
     }
-    else if (nivel == VIB_MEDIA)
-    {
+    else if (nivel == VIB_MEDIA) {
         texto = "VIB: MEDIA";
-        cor = LCD_AMARELO;
+        cor   = LCD_AMARELO;
     }
-    else
-    {
+    else {
         texto = "VIB: BAIXA";
-        cor = LCD_VERDE;
+        cor   = LCD_VERDE;
     }
 
     MostraEstado(texto, cor);
 }
 
-static uint8_t AtualizaNivel(uint32_t mediana_mg)
-{
+// Atualizar o nível de vibração
+static uint8_t AtualizaNivel(uint32_t mediana_mg) {
+
     uint8_t novo = nivel_vibracao;
 
-    // So durante o jogo, e nao no 1.o segundo (deixa ver "VAI! ABANA!").
-    if ((estado_jogo != JOGO_ATIVO) || (tempo_jogo_blocos < 6U))
-    {
+    if ((estado_jogo != JOGO_ATIVO) || (tempo_jogo_blocos < 6U)) {
         return 0U;
     }
 
-    if (nivel_vibracao == VIB_BAIXA)
-    {
-        if (mediana_mg >= NIVEL_ALTA_ENTRA_MG)
-            novo = VIB_ALTA;
-        else if (mediana_mg >= NIVEL_MEDIA_ENTRA_MG)
-            novo = VIB_MEDIA;
+    if (nivel_vibracao == VIB_BAIXA) {
+        if (mediana_mg >= NIVEL_ALTA_ENTRA_MG)       novo = VIB_ALTA;
+        else if (mediana_mg >= NIVEL_MEDIA_ENTRA_MG) novo = VIB_MEDIA;
     }
-    else if (nivel_vibracao == VIB_MEDIA)
-    {
-        if (mediana_mg >= NIVEL_ALTA_ENTRA_MG)
-            novo = VIB_ALTA;
-        else if (mediana_mg <= NIVEL_MEDIA_SAI_MG)
-            novo = VIB_BAIXA;
+    else if (nivel_vibracao == VIB_MEDIA) {
+        if (mediana_mg >= NIVEL_ALTA_ENTRA_MG)       novo = VIB_ALTA;
+        else if (mediana_mg <= NIVEL_MEDIA_SAI_MG)    novo = VIB_BAIXA;
     }
-    else
-    {
-        if (mediana_mg <= NIVEL_MEDIA_SAI_MG)
-            novo = VIB_BAIXA;
-        else if (mediana_mg <= NIVEL_ALTA_SAI_MG)
-            novo = VIB_MEDIA;
+    else {
+        if (mediana_mg <= NIVEL_MEDIA_SAI_MG)        novo = VIB_BAIXA;
+        else if (mediana_mg <= NIVEL_ALTA_SAI_MG)     novo = VIB_MEDIA;
     }
 
-    if (novo == nivel_vibracao)
-        return 0U;
+    if (novo == nivel_vibracao) return 0U;
 
     nivel_vibracao = novo;
     MostraNivelNoLCD(novo);
     return 1U;
 }
 
-static uint8_t AlvoBarra(uint32_t mediana_mg)
-{
-    if (mediana_mg <= BARRA_RUIDO_REPOUSO_MG)
-    {
-        return 0U;
-    }
-    if (mediana_mg >= BARRA_RMS_MAX_MG)
-    {
-        return BARRA_LARGURA;
-    }
+// Converter aceleração em pixeis da barra
+static uint8_t AlvoBarra(uint32_t mediana_mg) {
+
+    if (mediana_mg <= BARRA_RUIDO_REPOUSO_MG) return 0U;
+    if (mediana_mg >= LIMIAR_ATUAL_MG)        return BARRA_LARGURA;
 
     return (uint8_t)(
         ((mediana_mg - BARRA_RUIDO_REPOUSO_MG) * BARRA_LARGURA +
-         (BARRA_RMS_MAX_MG - BARRA_RUIDO_REPOUSO_MG) / 2U) /
-        (BARRA_RMS_MAX_MG - BARRA_RUIDO_REPOUSO_MG));
+         (LIMIAR_ATUAL_MG - BARRA_RUIDO_REPOUSO_MG) / 2U) /
+        (LIMIAR_ATUAL_MG - BARRA_RUIDO_REPOUSO_MG));
 }
 
-static uint8_t RaioParaBarra(uint8_t largura)
-{
+// Converter largura da barra em raio do balão
+static uint8_t RaioParaBarra(uint8_t largura) {
+
     return (uint8_t)(BALAO_RAIO_MIN +
         ((uint32_t)largura * (BALAO_RAIO_MAX - BALAO_RAIO_MIN) +
          BARRA_LARGURA / 2U) / BARRA_LARGURA);
 }
 
-// Calcula a semi-largura de cada faixa horizontal do balao.
-// Usa aritmetica inteira para evitar sqrtf durante o desenho.
-static uint8_t SemiLargura(uint8_t raio, uint8_t y)
-{
-    int32_t topo = (int32_t)y - (int32_t)BALAO_CY;
-    int32_t fundo = (int32_t)y + (int32_t)BALAO_ALT_FAIXA - 1 - (int32_t)BALAO_CY;
-    uint32_t dy_topo = (uint32_t)(topo < 0 ? -topo : topo);
+// Calcular largura de cada faixa horizontal do balão
+static uint8_t SemiLargura(uint8_t raio, uint8_t y) {
+
+    int32_t topo     = (int32_t)y - (int32_t)BALAO_CY;
+    int32_t fundo    = (int32_t)y + (int32_t)BALAO_ALT_FAIXA - 1 - (int32_t)BALAO_CY;
+    uint32_t dy_topo  = (uint32_t)(topo < 0 ? -topo : topo);
     uint32_t dy_fundo = (uint32_t)(fundo < 0 ? -fundo : fundo);
-    uint32_t dy = dy_topo > dy_fundo ? dy_topo : dy_fundo;
-    uint32_t r2 = (uint32_t)raio * raio;
-    uint8_t metade = raio;
+    uint32_t dy       = dy_topo > dy_fundo ? dy_topo : dy_fundo;
+    uint32_t r2       = (uint32_t)raio * raio;
+    uint8_t metade   = raio;
 
-    if ((raio == 0U) || (dy >= raio))
-    {
-        return 0U;
-    }
+    if ((raio == 0U) || (dy >= raio)) return 0U;
 
-    while (((uint32_t)metade * metade + dy * dy) > r2)
-    {
+    while (((uint32_t)metade * metade + dy * dy) > r2) {
         metade--;
     }
     return metade;
 }
 
-// Cada faixa atualiza so as parcelas que mudaram de tamanho.
-// Evita apagar e redesenhar o balao inteiro a cada frame.
-static void DesenhaBalao(uint8_t raio_antigo, uint8_t raio_novo)
-{
-    for (uint8_t faixa = 0U; faixa < BALAO_NUM_FAIXAS; faixa++)
-    {
+// Desenhar o balão no LCD
+static void DesenhaBalao(uint8_t raio_antigo, uint8_t raio_novo) {
+
+    for (uint8_t faixa = 0U; faixa < BALAO_NUM_FAIXAS; faixa++) {
         uint8_t y = (uint8_t)(BALAO_LINHA_INICIAL + faixa * BALAO_ALT_FAIXA);
         uint8_t a = SemiLargura(raio_antigo, y);
         uint8_t b = SemiLargura(raio_novo, y);
 
-        if (a == b)
-        {
-            continue;
-        }
+        if (a == b) continue;
 
-        if (b > a)
-        {
-            if (a == 0U)
-            {
-                lcd_draw_fillrect((uint8_t)(BALAO_CX - b), y,
-                                  (uint8_t)(2U * b + 1U),
-                                  BALAO_ALT_FAIXA, LCD_VERMELHO);
+        if (b > a) {
+            if (a == 0U) {
+                lcd_draw_fillrect((uint8_t)(BALAO_CX - b), y, (uint8_t)(2U * b + 1U), BALAO_ALT_FAIXA, LCD_VERMELHO);
             }
-            else
-            {
+            else {
                 uint8_t diferenca = (uint8_t)(b - a);
-                lcd_draw_fillrect((uint8_t)(BALAO_CX - b), y,
-                                  diferenca, BALAO_ALT_FAIXA, LCD_VERMELHO);
-                lcd_draw_fillrect((uint8_t)(BALAO_CX + a + 1U), y,
-                                  diferenca, BALAO_ALT_FAIXA, LCD_VERMELHO);
+                lcd_draw_fillrect((uint8_t)(BALAO_CX - b), y, diferenca, BALAO_ALT_FAIXA, LCD_VERMELHO);
+                lcd_draw_fillrect((uint8_t)(BALAO_CX + a + 1U), y, diferenca, BALAO_ALT_FAIXA, LCD_VERMELHO);
             }
         }
-        else
-        {
-            if (b == 0U)
-            {
-                lcd_draw_fillrect((uint8_t)(BALAO_CX - a), y,
-                                  (uint8_t)(2U * a + 1U),
-                                  BALAO_ALT_FAIXA, LCD_PRETO);
+        else {
+            if (b == 0U) {
+                lcd_draw_fillrect((uint8_t)(BALAO_CX - a), y, (uint8_t)(2U * a + 1U), BALAO_ALT_FAIXA, LCD_PRETO);
             }
-            else
-            {
+            else {
                 uint8_t diferenca = (uint8_t)(a - b);
-                lcd_draw_fillrect((uint8_t)(BALAO_CX - a), y,
-                                  diferenca, BALAO_ALT_FAIXA, LCD_PRETO);
-                lcd_draw_fillrect((uint8_t)(BALAO_CX + b + 1U), y,
-                                  diferenca, BALAO_ALT_FAIXA, LCD_PRETO);
+                lcd_draw_fillrect((uint8_t)(BALAO_CX - a), y, diferenca, BALAO_ALT_FAIXA, LCD_PRETO);
+                lcd_draw_fillrect((uint8_t)(BALAO_CX + b + 1U), y, diferenca, BALAO_ALT_FAIXA, LCD_PRETO);
             }
         }
     }
 }
 
-// Pequeno brilho branco no balao (posicao fixa, sempre dentro do raio
-// minimo). Redesenhado depois de cada alteracao da silhueta.
-static void DesenhaBrilho(void)
-{
-    lcd_draw_fillrect((uint8_t)(BALAO_CX - 4U), (uint8_t)(BALAO_CY - 5U),
-                      3U, 3U, LCD_BRANCO);
+// Desenhar o pequeno brilho branco no balão
+static void DesenhaBrilho(void) {
+    lcd_draw_fillrect((uint8_t)(BALAO_CX - 4U), (uint8_t)(BALAO_CY - 5U), 3U, 3U, LCD_BRANCO);
 }
 
-// Cor de cada coluna da barra: verde -> amarelo -> vermelho.
-static uint16_t CorBarra(uint8_t px)
-{
-    if (px < BARRA_ZONA_AMARELA)
-        return LCD_VERDE;
-    if (px < BARRA_ZONA_VERMELHA)
-        return LCD_AMARELO;
+// Cor da barra de acordo com a posição
+static uint16_t CorBarra(uint8_t px) {
+    if (px < BARRA_ZONA_AMARELA)  return LCD_VERDE;
+    if (px < BARRA_ZONA_VERMELHA) return LCD_AMARELO;
     return LCD_VERMELHO;
 }
 
-// Pinta as colunas [de, ate) da barra, dividindo pelas zonas de cor.
-static void PintaBarra(uint8_t de, uint8_t ate)
-{
-    while (de < ate)
-    {
+// Preencher colunas da barra
+static void PintaBarra(uint8_t de, uint8_t ate) {
+
+    while (de < ate) {
         uint8_t fim_zona;
 
-        if (de < BARRA_ZONA_AMARELA)
-            fim_zona = BARRA_ZONA_AMARELA;
-        else if (de < BARRA_ZONA_VERMELHA)
-            fim_zona = BARRA_ZONA_VERMELHA;
-        else
-            fim_zona = BARRA_LARGURA;
+        if (de < BARRA_ZONA_AMARELA)       fim_zona = BARRA_ZONA_AMARELA;
+        else if (de < BARRA_ZONA_VERMELHA) fim_zona = BARRA_ZONA_VERMELHA;
+        else                               fim_zona = BARRA_LARGURA;
 
-        if (fim_zona > ate)
-            fim_zona = ate;
+        if (fim_zona > ate) fim_zona = ate;
 
-        lcd_draw_fillrect((uint8_t)(BARRA_X + de), BARRA_Y,
-                          (uint8_t)(fim_zona - de), BARRA_ALTURA,
-                          CorBarra(de));
+        lcd_draw_fillrect((uint8_t)(BARRA_X + de), BARRA_Y, (uint8_t)(fim_zona - de), BARRA_ALTURA, CorBarra(de));
         de = fim_zona;
     }
 }
 
-// Pedacos do balao espalhados + "POP!" (posicoes fixas, sem rand()).
-static void DesenhaExplosao(void)
-{
-    static const int8_t dx[12] = {-24, 20, -14, 26, -28, 8,
-                                  -6, 22, -18, 4, 14, -26};
-    static const int8_t dy[12] = {-18, -14, 16, 6, -2, -24,
-                                  22, 20, 6, 14, -22, 18};
+// Desenhar explosão ("POP!")
+static void DesenhaExplosao(void) {
 
-    for (uint8_t i = 0U; i < 12U; i++)
-    {
+    static const int8_t dx[12] = {-24, 20, -14, 26, -28, 8, -6, 22, -18, 4, 14, -26};
+    static const int8_t dy[12] = {-18, -14, 16, 6, -2, -24, 22, 20, 6, 14, -22, 18};
+
+    for (uint8_t i = 0U; i < 12U; i++) {
         uint16_t cor = (i % 3U == 0U) ? LCD_AMARELO :
                        ((i % 3U == 1U) ? LCD_VERMELHO : LCD_LARANJA);
         lcd_draw_fillrect((uint8_t)((int16_t)BALAO_CX + dx[i] - 2),
-                          (uint8_t)((int16_t)BALAO_CY + dy[i] - 2),
-                          5U, 3U, cor);
+                          (uint8_t)((int16_t)BALAO_CY + dy[i] - 2), 5U, 3U, cor);
     }
-    // Tamanho 2: cada caracter ocupa 12 px -> "POP!" = 48 px.
-    lcd_draw_string((uint8_t)(BALAO_CX - 23U), (uint8_t)(BALAO_CY - 7U),
-                    (unsigned char *)"POP!", LCD_BRANCO, 2U);
+    lcd_draw_string((uint8_t)(BALAO_CX - 23U), (uint8_t)(BALAO_CY - 7U), (unsigned char *)"POP!", LCD_BRANCO, 2U);
 }
 
-// Apaga toda a zona do balao (usado depois da explosao).
-static void LimpaZonaBalao(void)
-{
-    lcd_draw_fillrect(0U, (uint8_t)(BALAO_LINHA_INICIAL - 4U), 128U,
-                      (uint8_t)(BALAO_CORDA_FIM - BALAO_LINHA_INICIAL + 6U),
-                      LCD_PRETO);
-}
+// Desenhar balão inicial pequeno
+static void BalaoInicial(void) {
 
-// Desenha um balao pequeno, com corda e brilho (inicio de cada jogo).
-static void BalaoInicial(void)
-{
     DesenhaBalao(0U, BALAO_RAIO_MIN);
     DesenhaCorda(0U, BALAO_RAIO_MIN);
     DesenhaBrilho();
     balao_raio_desenhado = BALAO_RAIO_MIN;
 }
 
-static void DesenhaCorda(uint8_t raio_antigo, uint8_t raio_novo)
-{
-    uint8_t comeco_antigo = (uint8_t)(BALAO_CY + raio_antigo + 1U);
-    uint8_t comeco_novo = (uint8_t)(BALAO_CY + raio_novo + 1U);
+// Desenhar ou apagar a corda do balão
+static void DesenhaCorda(uint8_t raio_antigo, uint8_t raio_novo) {
 
-    if ((raio_antigo != 0U) && (comeco_antigo <= BALAO_CORDA_FIM))
-    {
-        lcd_draw_fillrect((uint8_t)(BALAO_CX - 1U), comeco_antigo,
-                          2U, (uint8_t)(BALAO_CORDA_FIM - comeco_antigo + 1U),
-                          LCD_PRETO);
+    uint8_t comeco_antigo = (uint8_t)(BALAO_CY + raio_antigo + 1U);
+    uint8_t comeco_novo   = (uint8_t)(BALAO_CY + raio_novo + 1U);
+
+    if ((raio_antigo != 0U) && (comeco_antigo <= BALAO_CORDA_FIM)) {
+        lcd_draw_fillrect((uint8_t)(BALAO_CX - 1U), comeco_antigo, 2U,
+                          (uint8_t)(BALAO_CORDA_FIM - comeco_antigo + 1U), LCD_PRETO);
     }
 
-    if ((raio_novo != 0U) && (comeco_novo <= BALAO_CORDA_FIM))
-    {
-        lcd_draw_fillrect((uint8_t)(BALAO_CX - 1U), comeco_novo,
-                          2U, (uint8_t)(BALAO_CORDA_FIM - comeco_novo + 1U),
-                          LCD_CINZA);
+    if ((raio_novo != 0U) && (comeco_novo <= BALAO_CORDA_FIM)) {
+        lcd_draw_fillrect((uint8_t)(BALAO_CX - 1U), comeco_novo, 2U,
+                          (uint8_t)(BALAO_CORDA_FIM - comeco_novo + 1U), LCD_CINZA);
     }
 }
 
-static void AtualizaLED(uint8_t ligado)
-{
+// Atualizar o LED PB1
+static void AtualizaLED(uint8_t ligado) {
+
     BitAction nivel = (ligado != 0U) ? Bit_SET : Bit_RESET;
 #if LED_ATIVO_ALTO == 0U
     nivel = (ligado != 0U) ? Bit_RESET : Bit_SET;
@@ -888,48 +732,139 @@ static void AtualizaLED(uint8_t ligado)
     GPIO_WriteBit(GPIOB, GPIO_Pin_1, nivel);
 }
 
-static void ConfiguraLED(void)
-{
-    GPIO_InitTypeDef gpio;
-    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOB, ENABLE);
+// Configuração do LED PB1
+static void ConfiguraLED(void) {
 
-    // PB1 - saida para o LED. O botao PA1 ja nao e utilizado.
-    gpio.GPIO_Pin = GPIO_Pin_1;
+    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOB, ENABLE); // ativar clock do GPIOB
+
+    GPIO_InitTypeDef gpio;
+    gpio.GPIO_Pin   = GPIO_Pin_1;
     gpio.GPIO_Speed = GPIO_Speed_2MHz;
-    gpio.GPIO_Mode = GPIO_Mode_Out_PP;
+    gpio.GPIO_Mode  = GPIO_Mode_Out_PP; // saída Push-Pull
     GPIO_Init(GPIOB, &gpio);
-    AtualizaLED(0U);
+
+    AtualizaLED(0U); // começa apagado
 }
 
-// Maquina de estados do jogo, chamada em todos os blocos de 160 ms.
-//   ESPERA --(abanar, Med5 >= 120 mg)--> ATIVO
-//   ATIVO  --(rebenta)------------------> REBOU --(~2,6 s)--> ESPERA
-//   ATIVO  --(20 s sem rebentar)--------> FIM   --(~2,6 s)--> ESPERA
-// Rebenta quando Med5 >= 500 mg em 3 blocos seguidos E a barra e o balao
-// ja estao no maximo. Um novo jogo so pode comecar depois de Med5 descer
-// ate 95 mg (rearme), para nao arrancar logo a seguir ao anterior.
-// Nunca bloqueia: o ADC/DMA continuam a adquirir durante todo o jogo.
-// Eventos: 0 nenhum; 1 rebentou; 2 voltou a espera; 3 inicio; 4 tempo esgotado.
-static uint8_t AtualizaJogo(uint32_t rms_mediana_mg)
-{
-    if ((pode_rebentar == 0U) &&
-        (rms_mediana_mg <= REARME_AUTOMATICO_MG))
-    {
-        pode_rebentar = 1U;
-    }
+// =====================================================
+// Configuração do PWM no pino PB0 (TIM3 Canal 3)
+// =====================================================
+static void PWM_LED_Config(void) {
 
-    switch (estado_jogo)
-    {
-    case JOGO_ESPERA:
-        if ((pode_rebentar != 0U) && (rms_mediana_mg >= JOGO_INICIO_MG))
-        {
+    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOB, ENABLE); // ativar clock do GPIOB
+
+    // PB0 = TIM3_CH3
+    GPIO_InitTypeDef gpio;
+    gpio.GPIO_Pin   = GPIO_Pin_0;
+    gpio.GPIO_Speed = GPIO_Speed_2MHz;
+    gpio.GPIO_Mode  = GPIO_Mode_AF_PP; // saída alternativa Push-Pull
+    GPIO_Init(GPIOB, &gpio);
+
+    // Configuração do canal 3 em PWM
+    TIM_OCInitTypeDef oc;
+    TIM_OCStructInit(&oc);
+    oc.TIM_OCMode      = TIM_OCMode_PWM1; // modo PWM 1
+    oc.TIM_OutputState = TIM_OutputState_Enable; // ativar saída
+    oc.TIM_Pulse       = 0U; // começa com duty-cycle a 0%
+#if LED_ATIVO_ALTO == 0U
+    oc.TIM_OCPolarity  = TIM_OCPolarity_Low;
+#else
+    oc.TIM_OCPolarity  = TIM_OCPolarity_High;
+#endif
+    TIM_OC3Init(TIM3, &oc);
+    TIM_OC3PreloadConfig(TIM3, TIM_OCPreload_Enable);
+}
+
+// Atualizar o duty-cycle do LED PB0 de acordo com a barra
+static void AtualizaPWM(uint8_t barra_px) {
+    TIM_SetCompare3(TIM3, (uint16_t)(((uint32_t)barra_px * 50U) / BARRA_LARGURA));
+}
+
+// =====================================================
+// Configuração do Botão SW5 (PA1) com EXTI1
+// =====================================================
+static void Botao_EXTI_Config(void) {
+
+    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA | RCC_APB2Periph_AFIO, ENABLE); // ativar GPIOA e AFIO
+
+    // PA1 como entrada com pull-up
+    GPIO_InitTypeDef gpio;
+    gpio.GPIO_Pin   = GPIO_Pin_1;
+    gpio.GPIO_Speed = GPIO_Speed_2MHz;
+    gpio.GPIO_Mode  = GPIO_Mode_IPU; // entrada com pull-up
+    GPIO_Init(GPIOA, &gpio);
+
+    GPIO_EXTILineConfig(GPIO_PortSourceGPIOA, GPIO_PinSource1); // ligar PA1 à linha EXTI1
+
+    EXTI_InitTypeDef EXTI_InitStructure;
+    EXTI_InitStructure.EXTI_Line    = EXTI_Line1;
+    EXTI_InitStructure.EXTI_Mode    = EXTI_Mode_Interrupt; // modo interrupção
+    EXTI_InitStructure.EXTI_Trigger = EXTI_Trigger_Falling; // flanco descendente (ao carregar)
+    EXTI_InitStructure.EXTI_LineCmd = ENABLE; // ativar a linha EXTI1
+    EXTI_Init(&EXTI_InitStructure);
+}
+
+// Desenhar o ecrã do jogo
+static void DesenhaEcraJogo(void) {
+
+    lcd_draw_fillrect(0U, 0U, 128U, 160U, LCD_PRETO);
+    DesenhaCabecalho();
+    MostraCronometro();
+    MostraDificuldade();
+    MostraRecorde(JOGO_REC_X, JOGO_INFO_Y);
+
+    // Moldura da barra
+    lcd_draw_fillrect(10U, 70U, 108U, 1U, LCD_BRANCO);
+    lcd_draw_fillrect(10U, 83U, 108U, 1U, LCD_BRANCO);
+    lcd_draw_fillrect(10U, 71U, 1U, 12U, LCD_BRANCO);
+    lcd_draw_fillrect(117U, 71U, 1U, 12U, LCD_BRANCO);
+
+    BalaoInicial(); // desenha o balão
+}
+
+// Iniciar o jogo e a contagem 3, 2, 1
+static void IniciaJogo(void) {
+
+    char mensagem[48];
+
+    estado_jogo = JOGO_CONTAGEM;
+    blocos_contagem = 0U;
+    tempo_jogo_blocos = 0U;
+    contador_rebentamento = 0U;
+    nivel_vibracao = VIB_BAIXA;
+    barra_visual_px = 0U;
+    barra_desenhada_px = 0U;
+    balao_raio_desenhado = 0U;
+    AtualizaLED(0U);
+    AtualizaPWM(0U);
+
+    DesenhaEcraJogo();
+    MostraEstado("PREPARA... 3", LCD_BRANCO);
+    MostraValorJogo(0U); // inicia a 0 mg
+
+    snprintf(mensagem, sizeof(mensagem), "Jogo %s (%lu mg): 3, 2, 1...\r\n",
+             nome_dificuldade[dificuldade],
+             (unsigned long)LIMIAR_ATUAL_MG);
+    USART2_EnviaTexto(mensagem);
+}
+
+// Máquina de estados do jogo
+static uint8_t AtualizaJogo(uint32_t rms_mediana_mg) {
+
+    switch (estado_jogo) {
+    case JOGO_MENU:
+        return 0U;
+
+    case JOGO_CONTAGEM:
+        blocos_contagem++;
+        if (blocos_contagem >= CONTAGEM_BLOCOS) {
             estado_jogo = JOGO_ATIVO;
-            tempo_jogo_blocos = 0U;
-            contador_rebentamento = 0U;
-            nivel_vibracao = VIB_BAIXA;
-            MostraCronometro();
             MostraEstado("VAI! ABANA!", LCD_LARANJA);
-            return 3U;
+            return 3U; // início
+        }
+        if ((blocos_contagem % CONTAGEM_PASSO) == 0U) {
+            MostraEstado((blocos_contagem < 2U * CONTAGEM_PASSO) ?
+                         "PREPARA... 2" : "PREPARA... 1", LCD_BRANCO);
         }
         return 0U;
 
@@ -937,24 +872,20 @@ static uint8_t AtualizaJogo(uint32_t rms_mediana_mg)
         tempo_jogo_blocos++;
         MostraCronometro();
 
-        if (tempo_jogo_blocos >= JOGO_LIMITE_BLOCOS)
-        {
+        if (tempo_jogo_blocos >= JOGO_LIMITE_BLOCOS) {
             estado_jogo = JOGO_FIM;
             blocos_rebou = 0U;
-            pode_rebentar = 0U;
+            AtualizaPWM(0U);
             MostraEstado("TEMPO ESGOTADO", LCD_VERMELHO);
-            return 4U;
+            return 4U; // tempo esgotado
         }
 
-        if (rms_mediana_mg >= LIMIAR_REBENTAMENTO_MG)
-        {
-            if (contador_rebentamento < REBENTAMENTO_BLOCOS)
-            {
+        if (rms_mediana_mg >= LIMIAR_ATUAL_MG) {
+            if (contador_rebentamento < REBENTAMENTO_BLOCOS) {
                 contador_rebentamento++;
             }
         }
-        else
-        {
+        else {
             contador_rebentamento = 0U;
         }
 
@@ -964,109 +895,89 @@ static uint8_t AtualizaJogo(uint32_t rms_mediana_mg)
             (balao_raio_desenhado == BALAO_RAIO_MAX))
         {
             estado_jogo = JOGO_REBOU;
-            pode_rebentar = 0U;
             blocos_rebou = 0U;
             contador_rebentamento = 0U;
-            AtualizaLED(1U);
+            AtualizaLED(1U); // acende LED PB1
 
-            // Apagar balao e barra, desenhar a explosao.
             DesenhaCorda(balao_raio_desenhado, 0U);
             DesenhaBalao(balao_raio_desenhado, 0U);
             balao_raio_desenhado = 0U;
-            lcd_draw_fillrect(BARRA_X, BARRA_Y,
-                              BARRA_LARGURA, BARRA_ALTURA, LCD_PRETO);
+            lcd_draw_fillrect(BARRA_X, BARRA_Y, BARRA_LARGURA, BARRA_ALTURA, LCD_PRETO);
             barra_desenhada_px = 0U;
             barra_visual_px = 0U;
+            AtualizaPWM(0U);
             DesenhaExplosao();
 
-            if ((recorde_blocos == 0U) ||
-                (tempo_jogo_blocos < recorde_blocos))
+            if ((recorde_blocos[dificuldade] == 0U) ||
+                (tempo_jogo_blocos < recorde_blocos[dificuldade]))
             {
-                recorde_blocos = tempo_jogo_blocos;
-                MostraRecorde();
+                recorde_blocos[dificuldade] = tempo_jogo_blocos;
                 MostraEstado("NOVO RECORDE!", LCD_CIANO);
+                MostraRecorde(JOGO_REC_X, JOGO_INFO_Y);
             }
-            else
-            {
+            else {
                 MostraEstado("REBOU!", LCD_VERMELHO);
             }
-            return 1U;
+            return 1U; // rebentou
         }
         return 0U;
 
     default:
-        // JOGO_REBOU ou JOGO_FIM: manter o resultado no ecra durante
-        // REBOU_DURACAO_BLOCOS, sem parar a aquisicao.
         blocos_rebou++;
-        if (blocos_rebou >= REBOU_DURACAO_BLOCOS)
-        {
-            estado_jogo = JOGO_ESPERA;
+        if (blocos_rebou >= REBOU_DURACAO_BLOCOS) {
+            estado_jogo = JOGO_MENU;
             blocos_rebou = 0U;
-            AtualizaLED(0U);
-
-            LimpaZonaBalao();
-            lcd_draw_fillrect(BARRA_X, BARRA_Y,
-                              BARRA_LARGURA, BARRA_ALTURA, LCD_PRETO);
-            barra_visual_px = 0U;
-            barra_desenhada_px = 0U;
-            nivel_vibracao = VIB_BAIXA;
-            balao_raio_desenhado = 0U;
-            BalaoInicial();
-            MostraEstado("ABANA P/ JOGAR", LCD_BRANCO);
+            AtualizaLED(0U); // apaga LED PB1
+            AtualizaPWM(0U);
+            DesenhaMenu(); // volta ao menu
             return 2U;
         }
         return 0U;
     }
 }
 
-// Limitar o ritmo de animacao: subida gradual, descida ainda mais lenta.
-static uint8_t AtualizaAnimacao(uint32_t rms_mediana_mg, uint32_t bloco)
-{
+// Atualizar animação da barra e do balão
+static uint8_t AtualizaAnimacao(uint32_t rms_mediana_mg, uint32_t bloco) {
+
     uint8_t alvo, diferenca, novo_raio;
     uint8_t desenhou = 0U;
 
-    if ((estado_jogo != JOGO_ATIVO) ||
-        ((bloco % BARRA_PERIODO_BLOCOS) != 0U))
-    {
+    if ((estado_jogo != JOGO_ATIVO) || ((bloco % BARRA_PERIODO_BLOCOS) != 0U)) {
         return 0U;
     }
 
+    MostraValorJogo(rms_mediana_mg); // atualiza o valor numérico em mg e g
+
     alvo = AlvoBarra(rms_mediana_mg);
-    if (alvo > barra_visual_px)
-    {
+    if (alvo > barra_visual_px) {
         diferenca = (uint8_t)(alvo - barra_visual_px);
-        if (diferenca > BARRA_PASSO_SUBIDA_PX)
-        {
+        if (diferenca > BARRA_PASSO_SUBIDA_PX) {
             diferenca = BARRA_PASSO_SUBIDA_PX;
         }
         barra_visual_px = (uint8_t)(barra_visual_px + diferenca);
     }
-    else if (alvo < barra_visual_px)
-    {
+    else if (alvo < barra_visual_px) {
         diferenca = (uint8_t)(barra_visual_px - alvo);
-        if (diferenca > BARRA_PASSO_DESCIDA_PX)
-        {
+        if (diferenca > BARRA_PASSO_DESCIDA_PX) {
             diferenca = BARRA_PASSO_DESCIDA_PX;
         }
         barra_visual_px = (uint8_t)(barra_visual_px - diferenca);
     }
 
-    // A barra so escreve os pixeis que aumentaram ou desapareceram.
+    AtualizaPWM(barra_visual_px); // atualiza o brilho do LED
+
     diferenca = (uint8_t)((barra_visual_px >= barra_desenhada_px) ?
         (barra_visual_px - barra_desenhada_px) :
         (barra_desenhada_px - barra_visual_px));
 
     if ((diferenca >= BARRA_DELTA_MIN_PX) ||
         ((diferenca != 0U) &&
-         ((barra_visual_px == BARRA_LARGURA) ||
-          (barra_visual_px == 0U))))
+         ((barra_visual_px == BARRA_LARGURA) || (barra_visual_px == 0U))))
     {
-        if (barra_visual_px > barra_desenhada_px)
-        {
+        if (barra_visual_px > barra_desenhada_px) {
             PintaBarra(barra_desenhada_px, barra_visual_px);
         }
-        else
-        {
+        else {
             lcd_draw_fillrect((uint8_t)(BARRA_X + barra_visual_px),
                               BARRA_Y, diferenca, BARRA_ALTURA, LCD_PRETO);
         }
@@ -1074,11 +985,8 @@ static uint8_t AtualizaAnimacao(uint32_t rms_mediana_mg, uint32_t bloco)
         desenhou = 1U;
     }
 
-    // O raio responde ao MESMO valor visual da barra.
     novo_raio = RaioParaBarra(barra_visual_px);
-    if (novo_raio != balao_raio_desenhado)
-    {
-        // A corda e restaurada depois das alteracoes na silhueta.
+    if (novo_raio != balao_raio_desenhado) {
         DesenhaCorda(balao_raio_desenhado, 0U);
         DesenhaBalao(balao_raio_desenhado, novo_raio);
         DesenhaCorda(0U, novo_raio);
@@ -1090,44 +998,32 @@ static uint8_t AtualizaAnimacao(uint32_t rms_mediana_mg, uint32_t bloco)
     return desenhou;
 }
 
-// O DMA e circular e continua a escrever enquanto o CPU desenha no LCD.
-// Copiar rapidamente a metade pronta para RAM local; nunca calcular RMS
-// diretamente sobre amostras que podem ser substituidas pelo DMA.
-// CNDTR: 192..97 = a escrever primeira metade; 96..1 = segunda metade.
-static uint8_t CopiaMetadeDMA(uint8_t metade,
-                             uint16_t destino[AMOSTRAS_BLOCO][3])
-{
+// Copiar metade do buffer do DMA
+static uint8_t CopiaMetadeDMA(uint8_t metade, uint16_t destino[AMOSTRAS_BLOCO][3]) {
+
     uint16_t antes = DMA_GetCurrDataCounter(DMA1_Channel1);
     uint16_t depois;
 
-    if (antes == 0U || antes > (2U * ELEMENTOS_MEIO_DMA))
-        return 0U;
+    if (antes == 0U || antes > (2U * ELEMENTOS_MEIO_DMA)) return 0U;
     if ((metade == 0U && antes > ELEMENTOS_MEIO_DMA) ||
-        (metade == 1U && antes <= ELEMENTOS_MEIO_DMA))
-        return 0U;
+        (metade == 1U && antes <= ELEMENTOS_MEIO_DMA)) return 0U;
 
-    for (uint32_t i = 0U; i < AMOSTRAS_BLOCO; i++)
-    {
+    for (uint32_t i = 0U; i < AMOSTRAS_BLOCO; i++) {
         for (uint8_t eixo = 0U; eixo < 3U; eixo++)
             destino[i][eixo] = adc_buffer[metade][i][eixo];
     }
 
-    // Se houve mudanca de metade durante a copia, nao usar os dados.
     depois = DMA_GetCurrDataCounter(DMA1_Channel1);
     if (depois == 0U ||
         (metade == 0U && depois > ELEMENTOS_MEIO_DMA) ||
-        (metade == 1U && depois <= ELEMENTOS_MEIO_DMA))
-        return 0U;
+        (metade == 1U && depois <= ELEMENTOS_MEIO_DMA)) return 0U;
 
     return 1U;
 }
 
-// Calculo da variancia AC exatamente equivalente a retirar a media:
-// RMS^2 = [N*sum(x^2) - (sum(x))^2] / N^2.
-// Somatorios inteiros (sem erros de cancelamento em float), tres sqrtf apenas
-// para os eixos, mais um para o RMS total.
-void MostraBloco(uint8_t metade, uint32_t numero)
-{
+// Processa o bloco e calcula o RMS
+void MostraBloco(uint8_t metade, uint32_t numero) {
+
     uint16_t amostras[AMOSTRAS_BLOCO][3];
     uint32_t soma[3] = {0U, 0U, 0U};
     uint32_t soma_quadrados[3] = {0U, 0U, 0U};
@@ -1141,62 +1037,56 @@ void MostraBloco(uint8_t metade, uint32_t numero)
     char mensagem[128];
     static uint32_t ultimo_aviso_dma = 0U;
 
-    if (CopiaMetadeDMA(metade, amostras) == 0U)
-    {
+    if (CopiaMetadeDMA(metade, amostras) == 0U) {
         blocos_dma_descartados++;
         return;
     }
 
-    for (uint32_t i = 0U; i < AMOSTRAS_BLOCO; i++)
-    {
-        for (uint8_t eixo = 0U; eixo < 3U; eixo++)
-        {
+    for (uint32_t i = 0U; i < AMOSTRAS_BLOCO; i++) {
+        for (uint8_t eixo = 0U; eixo < 3U; eixo++) {
             uint32_t a = amostras[i][eixo];
             soma[eixo] += a;
             soma_quadrados[eixo] += a * a;
         }
     }
 
-    for (uint8_t eixo = 0U; eixo < 3U; eixo++)
-    {
+    // RMS por eixo
+    for (uint8_t eixo = 0U; eixo < 3U; eixo++) {
         uint64_t variacao =
             (uint64_t)AMOSTRAS_BLOCO * soma_quadrados[eixo] -
             (uint64_t)soma[eixo] * soma[eixo];
         float rms_contagens = sqrtf((float)variacao) / (float)AMOSTRAS_BLOCO;
 
-        // Escala nominal: Vref=3.3V, sensibilidade=0.33 V/g.
-        rms_g[eixo] = rms_contagens / 409.5f;
+        rms_g[eixo] = rms_contagens / 409.5f; // sensibilidade 330 mV/g
         rms_eixo_mg[eixo] = (uint32_t)(rms_g[eixo] * 1000.0f + 0.5f);
     }
 
-    rms_total_g = sqrtf(rms_g[0]*rms_g[0] +
-                        rms_g[1]*rms_g[1] + rms_g[2]*rms_g[2]);
+    rms_total_g  = sqrtf(rms_g[0]*rms_g[0] + rms_g[1]*rms_g[1] + rms_g[2]*rms_g[2]);
     rms_total_mg = (uint32_t)(rms_total_g * 1000.0f + 0.5f);
 
-    // Medicao e interface permanecem separadas.
-    rms_mediana_mg = MedianaMovel5(rms_total_mg);
+    rms_mediana_mg = MedianaMovel5(rms_total_mg); // filtro de mediana
     evento = AtualizaJogo(rms_mediana_mg);
-    if (evento == 0U)
-    {
-        mudou_nivel = AtualizaNivel(rms_mediana_mg);
+    if (evento == 0U) {
+        mudou_nivel    = AtualizaNivel(rms_mediana_mg);
         mudou_animacao = AtualizaAnimacao(rms_mediana_mg, numero);
+        if ((estado_jogo == JOGO_MENU) && ((numero % 2U) == 0U)) {
+            MostraValorMenu(rms_mediana_mg); // leitura contínua no menu
+        }
     }
     desenhou_lcd = (uint8_t)(mudou_nivel || mudou_animacao);
 
     if (evento == 1U)       marca = " [REBOU]";
-    else if (evento == 2U)  marca = " [ESPERA]";
+    else if (evento == 2U)  marca = " [MENU]";
     else if (evento == 3U)  marca = " [INICIO]";
     else if (evento == 4U)  marca = " [TEMPO ESGOTADO]";
     else if (desenhou_lcd)  marca = " [LCD]";
 
-    // Menos texto a 9600 bps para libertar a CPU para o LCD/ADC.
-    // Nunca esconder os eventos nem a existencia de blocos rejeitados.
+    // Enviar dados pela USART2
     if (((numero % USART_LOG_CADA_BLOCOS) == 0U) ||
         (evento != 0U) || (desenhou_lcd != 0U) ||
         (blocos_dma_descartados != ultimo_aviso_dma))
     {
-        if (blocos_dma_descartados != 0U)
-        {
+        if (blocos_dma_descartados != 0U) {
             snprintf(mensagem, sizeof(mensagem),
                      "Bloco %lu | RMS: X=%lu Y=%lu Z=%lu Total=%lu Med5=%lu mg%s | DMA_desc=%lu\r\n",
                      (unsigned long)numero,
@@ -1207,8 +1097,7 @@ void MostraBloco(uint8_t metade, uint32_t numero)
                      (unsigned long)rms_mediana_mg, marca,
                      (unsigned long)blocos_dma_descartados);
         }
-        else
-        {
+        else {
             snprintf(mensagem, sizeof(mensagem),
                      "Bloco %lu | RMS: X=%lu Y=%lu Z=%lu Total=%lu Med5=%lu mg%s\r\n",
                      (unsigned long)numero,
@@ -1222,142 +1111,195 @@ void MostraBloco(uint8_t metade, uint32_t numero)
         ultimo_aviso_dma = blocos_dma_descartados;
     }
 
-    // Resultado do jogo no terminal.
-    if (evento == 1U)
-    {
+    if (evento == 1U) {
         uint32_t t = (tempo_jogo_blocos * JOGO_MS_POR_BLOCO) / 100U;
-        uint32_t r = (recorde_blocos * JOGO_MS_POR_BLOCO) / 100U;
+        uint32_t r = (recorde_blocos[dificuldade] * JOGO_MS_POR_BLOCO) / 100U;
         snprintf(mensagem, sizeof(mensagem),
-                 ">>> REBENTOU em %lu.%lu s | Recorde: %lu.%lu s\r\n",
+                 ">>> REBENTOU em %lu.%lu s | Recorde %s: %lu.%lu s\r\n",
                  (unsigned long)(t / 10U), (unsigned long)(t % 10U),
+                 nome_dificuldade[dificuldade],
                  (unsigned long)(r / 10U), (unsigned long)(r % 10U));
         USART2_EnviaTexto(mensagem);
     }
 }
 
-int main(void)
+// Menu de ajuda no terminal
+static void MostraAjuda(void) {
+    USART2_EnviaTexto("Comandos (no menu): h ajuda | 1 facil | 2 normal | 3 dificil | j jogar | r apaga recordes\r\n");
+    USART2_EnviaTexto("Botao SW5 no menu: clique muda o nivel, segurar 1 s comeca\r\n");
+}
 
-{
+// Alterar a dificuldade
+static void MudaDificuldade(uint8_t nova) {
+
+    char mensagem[48];
+
+    dificuldade = nova;
+    DesenhaOpcoes();
+    snprintf(mensagem, sizeof(mensagem), "Nivel: %s (%lu mg)\r\n",
+             nome_dificuldade[dificuldade],
+             (unsigned long)LIMIAR_ATUAL_MG);
+    USART2_EnviaTexto(mensagem);
+}
+
+// Gestão do botão SW5
+static uint8_t botao_em_espera = 0U;
+static uint32_t bloco_inicio_botao = 0U;
+static uint32_t ultimo_bloco_botao = 0U;
+
+// Ao carregar no botão (chamado via interrupção EXTI1)
+static void BotaoCarregado(uint32_t numero_bloco) {
+
+    if ((estado_jogo != JOGO_MENU) || (botao_em_espera != 0U)) {
+        return;
+    }
+    if ((numero_bloco - ultimo_bloco_botao) < BOTAO_DEBOUNCE_BLOCOS) {
+        return;
+    }
+    botao_em_espera = 1U;
+    bloco_inicio_botao = numero_bloco;
+}
+
+// Verifica se foi clique ou segurar durante 1 s
+static void VerificaBotao(uint32_t numero_bloco) {
+
+    if (botao_em_espera == 0U) {
+        return;
+    }
+    if (estado_jogo != JOGO_MENU) {
+        botao_em_espera = 0U;
+        return;
+    }
+
+    // PA1 ativo a zero: Bit_SET = botão largado
+    if (GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_1) == Bit_SET) {
+        botao_em_espera = 0U;
+        ultimo_bloco_botao = numero_bloco;
+        MudaDificuldade((uint8_t)((dificuldade + 1U) % NUM_DIFICULDADES)); // clique: muda nível
+    }
+    else if ((numero_bloco - bloco_inicio_botao) >= BOTAO_SEGURAR_BLOCOS) {
+        botao_em_espera = 0U;
+        ultimo_bloco_botao = numero_bloco;
+        IniciaJogo(); // segurou 1 s: começa o jogo
+    }
+}
+
+// Tratar caracteres recebidos pela USART2
+static void TrataComando(char c) {
+
+    if ((c == '\r') || (c == '\n')) return;
+    if ((c == 'h') || (c == '?')) {
+        MostraAjuda();
+        return;
+    }
+    if (estado_jogo != JOGO_MENU) {
+        USART2_EnviaTexto("Comando so no menu (fim do jogo).\r\n");
+        return;
+    }
+
+    switch (c) {
+    case 'r':
+        for (uint8_t i = 0U; i < NUM_DIFICULDADES; i++) {
+            recorde_blocos[i] = 0U;
+        }
+        MostraRecorde(MENU_REC_X, MENU_REC_Y);
+        USART2_EnviaTexto("Recordes apagados.\r\n");
+        break;
+    case '1':
+    case '2':
+    case '3':
+        MudaDificuldade((uint8_t)(c - '1'));
+        break;
+    case 'j':
+        IniciaJogo();
+        break;
+    default:
+        USART2_EnviaTexto("Comando desconhecido (h = ajuda).\r\n");
+        break;
+    }
+}
+
+// =====================================================
+// Função Principal (main)
+// =====================================================
+int main(void) {
 
     uint32_t numero_bloco = 0;
 
-    // ================================================
-
-    // 1. CONFIGURAR O CLOCK DO STM32
-
-    // ================================================
-
+    // 1. Configurar clock do sistema a 72 MHz
     RCC_Config_HSE_PLL_Max();
 
-    // ================================================
-
-    // 2. INICIALIZAR PRIMEIRO O LCD
-
-    // ================================================
-
-    // Necessario para permitir o remapeamento dos pinos SWJ do LCD
-
+    // 2. Inicializar o ecrã LCD
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_AFIO, ENABLE);
-
     lcd_init();
 
-    // O lcd_init ja apaga todo o LCD. Desenhar so a interface estatica.
-    lcd_draw_string(16, 6, (unsigned char *)"DESAFIO DO BALAO",
-                    LCD_AMARELO, 1);
-    lcd_draw_fillrect(10, 16, 108, 1, LCD_LARANJA);
-    MostraCronometro();
-    MostraRecorde();
-    MostraEstado("ABANA P/ JOGAR", LCD_BRANCO);
-    lcd_draw_string(10, 53, (unsigned char *)"0", LCD_BRANCO, 1);
-    lcd_draw_string(82, 53, (unsigned char *)"500 mg", LCD_BRANCO, 1);
+    // Desenhar a página do menu inicial
+    DesenhaMenu();
 
-    // Moldura fixa da barra. Interior: x=12..115, y=73..80.
-    lcd_draw_fillrect(10, 70, 108, 1, LCD_BRANCO);
-    lcd_draw_fillrect(10, 83, 108, 1, LCD_BRANCO);
-    lcd_draw_fillrect(10, 71, 1, 12, LCD_BRANCO);
-    lcd_draw_fillrect(117, 71, 1, 12, LCD_BRANCO);
+    // 3. Inicialização dos periféricos
+    USART2_Config();      // USART2 com interrupção RX
+    ConfiguraLED();       // LED PB1 (rebentamento)
+    ADC1_DMA_Config();    // ADC1 e DMA1
+    TIM3_Config_200Hz();  // Timer 3 a 200 Hz
+    PWM_LED_Config();     // PWM no LED PB0 (TIM3_CH3)
+    Botao_EXTI_Config();  // Botão SW5 (EXTI1)
+    NVIC_Config();        // Configurar as interrupções
 
-    // Balao inicial pequeno, com corda e brilho.
-    BalaoInicial();
-
-    // ================================================
-
-    // 3. INICIALIZAR OS RESTANTES PERIFERICOS
-
-    // ================================================
-
-    USART2_Config();
-
-    ConfiguraLED();
-
-    ADC1_DMA_Config();
-
-    TIM3_Config_200Hz();
-
-    // ================================================
-
-    // 4. MENSAGENS INICIAIS
-
-    // ================================================
-
+    // 4. Mensagens iniciais na USART2
     USART2_EnviaTexto("\r\nPROJETO SISEM\r\n");
-
-    USART2_EnviaTexto("ADC + DMA + TIM3 + LCD\r\n");
-
-    USART2_EnviaTexto("200Hz | Med5 | BAIXA/MEDIA/ALTA | POP=500mg\r\n");
-    USART2_EnviaTexto("DESAFIO DO BALAO: abana para comecar, rebenta em menos de 20 s\r\n");
+    USART2_EnviaTexto("ADC + DMA (IRQ HT/TC) + TIM3 + LCD\r\n");
+    USART2_EnviaTexto("200Hz | Med5 | BAIXA/MEDIA/ALTA | POP=300/500/700mg\r\n");
+    USART2_EnviaTexto("DESAFIO DO BALAO: escolhe o nivel, segura SW5 1 s e rebenta em menos de 20 s\r\n");
     USART2_EnviaTexto("LCD e USART: eventos + 1 linha / 2 blocos; DMA_desc=descartes\r\n");
+    MostraAjuda();
 
-    // ================================================
-
-    // 5. INICIAR A AQUISICAO
-
-    // ================================================
-
+    // 5. Iniciar o DMA e o TIM3
     DMA_ClearFlag(DMA1_FLAG_GL1);
+    DMA_Cmd(DMA1_Channel1, ENABLE); // ativar DMA1
+    TIM_Cmd(TIM3, ENABLE);          // ativar TIM3
 
-    DMA_Cmd(DMA1_Channel1, ENABLE);
+    // 6. Ciclo infinito
+    while (1) {
 
-    TIM_Cmd(TIM3, ENABLE);
+        uint8_t pendentes;
+        uint8_t botao;
+        char comando;
 
-    // ================================================
+        // Desativa interrupções para ler variáveis partilhadas
+        __disable_irq();
+        pendentes          = dma_metade_pronta;
+        dma_metade_pronta  = 0U;
+        botao              = botao_pressionado;
+        botao_pressionado  = 0U;
+        comando            = comando_usart;
+        comando_usart      = 0;
+        __enable_irq();
 
-    // 6. PROGRAMA PRINCIPAL
+        // Botão SW5: marca início do toque
+        if (botao != 0U) {
+            BotaoCarregado(numero_bloco);
+        }
 
-    // ================================================
+        // Trata comando recebido pela USART2
+        if (comando != 0) {
+            TrataComando(comando);
+        }
 
-    while (1)
-
-    {
-
-        // Primeira metade do buffer pronta
-
-        if (DMA_GetFlagStatus(DMA1_FLAG_HT1) != RESET)
-
-        {
-
-            DMA_ClearFlag(DMA1_FLAG_HT1);
-
+        // Processa 1ª metade do buffer DMA (Half Transfer)
+        if ((pendentes & 0x01U) != 0U) {
             numero_bloco++;
-
             MostraBloco(0, numero_bloco);
-
         }
 
-        // Segunda metade do buffer pronta
-
-        if (DMA_GetFlagStatus(DMA1_FLAG_TC1) != RESET)
-
-        {
-
-            DMA_ClearFlag(DMA1_FLAG_TC1);
-
+        // Processa 2ª metade do buffer DMA (Transfer Complete)
+        if ((pendentes & 0x02U) != 0U) {
             numero_bloco++;
-
             MostraBloco(1, numero_bloco);
-
         }
 
+        // Verifica estado do botão (clique ou segurar 1 s)
+        if (pendentes != 0U) {
+            VerificaBotao(numero_bloco);
+        }
     }
-
 }
