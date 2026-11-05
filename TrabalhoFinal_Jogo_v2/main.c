@@ -126,10 +126,9 @@
 #define BOTAO_SEGURAR_BLOCOS  6U  // 6 x 160 ms = ~1 s
 #define BOTAO_DEBOUNCE_BLOCOS 2U  // ignora ressaltos durante 320 ms
 
-// Menu: so o nivel escolhido (tamanho 2 = 16 px de altura) e o seu recorde.
-#define MENU_NIVEL_Y         64U
-#define MENU_REC_X           31U  // "REC: 05.4 s" = 11 caracteres x 6 px, centrado
-#define MENU_REC_Y           92U
+// Menu: uma linha por nivel (texto em tamanho 2 = 16 px de altura).
+#define MENU_Y0              40U
+#define MENU_PASSO           32U
 #define JOGO_REC_X           58U  // a direita do nome do nivel
 
 // Zonas de cor da barra (em pixeis): verde, amarelo, vermelho.
@@ -637,7 +636,7 @@ static uint8_t dificuldade = DIF_NORMAL;
 #define LIMIAR_ATUAL_MG  (limiar_dificuldade_mg[dificuldade])
 
 // Recorde (melhor tempo) por dificuldade; 0 = ainda sem recorde.
-// Aparece no menu (nivel escolhido) e no jogo, ao lado do nome do nivel.
+// No LCD so aparece no jogo, ao lado do nome do nivel.
 static uint32_t recorde_blocos[NUM_DIFICULDADES] = {0U, 0U, 0U};
 
 // Marcas escritas pelas rotinas de interrupcao (stm32f10x_it.c).
@@ -724,30 +723,27 @@ static void DesenhaCabecalho(void)
 // =====================================================
 // MENU INICIAL (pagina a parte)
 // =====================================================
-// Mostra apenas o nivel escolhido, centrado e na sua cor, com o recorde
-// por baixo. Cada clique no SW5 passa para o nivel seguinte.
+// Os tres niveis, um por linha: o escolhido na sua cor, os outros a cinzento.
 static void DesenhaOpcoes(void)
 {
-    const char *nome = nome_dificuldade[dificuldade];
+    for (uint8_t i = 0U; i < NUM_DIFICULDADES; i++)
+    {
+        uint8_t y = (uint8_t)(MENU_Y0 + i * MENU_PASSO);
+        const char *nome = nome_dificuldade[i];
+        uint16_t cor = (i == dificuldade) ? cor_dificuldade[i] : LCD_CINZA;
 
-    // O texto em tamanho 2 nao apaga o fundo: limpar a linha primeiro.
-    lcd_draw_fillrect(0U, MENU_NIVEL_Y, 128U, 16U, LCD_PRETO);
-    lcd_draw_string((uint8_t)(64U - Comprimento(nome) * 6U), MENU_NIVEL_Y,
-                    (unsigned char *)nome, cor_dificuldade[dificuldade], 2U);
-
-    MostraRecorde(MENU_REC_X, MENU_REC_Y);
+        // O texto em tamanho 2 nao apaga o fundo: limpar a linha primeiro.
+        lcd_draw_fillrect(0U, y, 128U, 16U, LCD_PRETO);
+        lcd_draw_string((uint8_t)(64U - Comprimento(nome) * 6U), y,
+                        (unsigned char *)nome, cor, 2U);
+    }
 }
 
-// Pagina inicial: titulo, nivel escolhido, recorde e duas dicas.
+// Pagina inicial: so os tres niveis.
 static void DesenhaMenu(void)
 {
     lcd_draw_fillrect(0U, 0U, 128U, 160U, LCD_PRETO);
-    DesenhaCabecalho();
     DesenhaOpcoes();
-    lcd_draw_string(25U, 128U, (unsigned char *)"CLIQUE: NIVEL",
-                    LCD_CINZA, 1U);
-    lcd_draw_string(25U, 142U, (unsigned char *)"SEGURA: JOGAR",
-                    LCD_CINZA, 1U);
 }
 
 // Escreve apenas quando ha uma mudanca de nivel (pouco trafego SPI).
@@ -1568,7 +1564,6 @@ static void TrataComando(char c)
         {
             recorde_blocos[i] = 0U;
         }
-        MostraRecorde(MENU_REC_X, MENU_REC_Y);
         USART2_EnviaTexto("Recordes apagados.\r\n");
         break;
     case '1':

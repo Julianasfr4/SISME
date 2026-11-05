@@ -6,7 +6,7 @@ A aquisição e o processamento não mudaram. Mudaram a interface no LCD, a lóg
 
 ## Como se joga
 
-1. Ao ligar, aparece o **menu**, numa página à parte e o mais simples possível: o título, só o nível escolhido (FACIL, NORMAL ou DIFICIL), em tamanho grande e na sua cor, o recorde desse nível (**REC: ss.d s**, ou **REC: --.- s** se ainda não há) e as dicas **CLIQUE: NIVEL** e **SEGURA: JOGAR**.
+1. Ao ligar, aparece o **menu**, numa página à parte e o mais simples possível: só as palavras FACIL, NORMAL e DIFICIL, uma por linha; o nível escolhido fica na sua cor e os outros a cinzento.
 2. **Clique** no SW5 (largar antes de 1 s): passa para o nível seguinte.
 3. **Segurar** o SW5 durante 1 s: começa o desafio. O ecrã muda para a página do jogo e aparece a contagem **PREPARA... 3, 2, 1**.
 4. Aparece **VAI! ABANA!** e o cronómetro (**TEMPO: ss.d s**) começa a contar.
@@ -15,7 +15,7 @@ A aquisição e o processamento não mudaram. Mudaram a interface no LCD, a lóg
 7. Se passarem 20 s sem rebentar, aparece **TEMPO ESGOTADO**.
 8. Passados cerca de 2,6 s, volta sozinho ao menu.
 
-Os recordes ficam em RAM, um por nível, e perdem-se ao fazer reset. Aparecem no LCD, a ciano (no menu, para o nível escolhido, e no jogo, à direita do nome do nível), e no terminal (`>>> REBENTOU em X s | Recorde NORMAL: Y s`).
+Os recordes ficam em RAM, um por nível, e perdem-se ao fazer reset. Aparecem no LCD, a ciano, só no jogo (à direita do nome do nível), e no terminal (`>>> REBENTOU em X s | Recorde NORMAL: Y s`).
 
 ## Controlos
 
@@ -81,7 +81,7 @@ O NVIC é configurado antes de ligar o DMA e o TIM3, para não perder a primeira
 | Ecrã inicial | Não existia | Página à parte com o menu dos níveis (`DesenhaMenu()`, `DesenhaOpcoes()`) |
 | Início do jogo | Começava sozinho ao abanar | Segurar o SW5 1 s (ou `j`), contagem 3, 2, 1 (`IniciaJogo()`, `DesenhaEcraJogo()`) |
 | Cronómetro | Não existia | Conta blocos de 160 ms e mostra `TEMPO: ss.d s` |
-| Recorde | Não existia | Melhor tempo por nível em `recorde_blocos`, no LCD (`REC: ss.d s` no menu e no jogo, `MostraRecorde()`), no terminal e em "NOVO RECORDE!" |
+| Recorde | Não existia | Melhor tempo por nível em `recorde_blocos`, no LCD (`REC: ss.d s` no jogo, `MostraRecorde()`), no terminal e em "NOVO RECORDE!" |
 | Escala da barra | "0" e "500 mg" à volta da barra | Tirada: só fica o nome do nível |
 | Tempo limite | Não existia | 125 blocos = 20 s (`JOGO_LIMITE_BLOCOS`) |
 | Ritmo da animação | A cada 4 blocos (640 ms) | A cada 2 blocos (320 ms), `BARRA_PERIODO_BLOCOS = 2` |
@@ -109,7 +109,7 @@ Nenhum estado bloqueia: o ADC e o DMA continuam a adquirir durante todo o jogo.
 1. No STM32CubeIDE, abre o projeto da placa (3SO) e guarda uma cópia do `main.c` atual.
 2. Substitui o `main.c` e o `stm32f10x_it.c` por estes (o handler do DMA está no `stm32f10x_it.c`). Confirma que o projeto tem `lcd.c`, `lcd.h` e `syscalls.c`.
 3. Compila, grava a placa e abre um terminal a 9600 bps (por exemplo `screen /dev/ttyUSB0 9600`).
-4. No menu, clica no SW5: aparece o nível seguinte, com o seu recorde.
+4. No menu, clica no SW5: o nível seguinte fica com a sua cor.
 5. Segura o SW5 1 s: aparece a página do jogo e a contagem. Abana até rebentar e confirma que volta ao menu. Joga outra vez sem abanar para ver o TEMPO ESGOTADO.
 6. No terminal escreve `h`, `1`, `3`, `r` e `j`.
 7. Durante o jogo, o LED PB0 deve brilhar mais à medida que a barra enche.
