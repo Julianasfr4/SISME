@@ -135,3 +135,22 @@ Usar:
 2. Corre `venv/bin/python grafico_vibracao.py` (porta `/dev/ttyACM0`, 60 s). Opções: `--porta COM3` (Windows), `--tempo 90`, ou `--ficheiro registo.txt` para ler um registo do terminal já gravado.
 3. Durante a aquisição, faz a sequência de demonstração: 10 s em repouso, 10 s a abanar fraco, 10 s a abanar forte, um jogo até rebentar e repouso.
 4. Ficam `vibracao_<data>.csv` e `vibracao_<data>.png` na pasta atual.
+
+## Validação na placa (5 de novembro de 2026)
+
+Teste feito pela porta série (`/dev/ttyACM0`, 9600 bps), com a placa em repouso, enviando comandos pela USART2 RX:
+
+| Tempo | Enviado | Resposta da placa | Confirma |
+| --- | --- | --- | --- |
+| 0,2 s | `h` | Ajuda dos comandos | USART RX por interrupção |
+| 2,4 s | `3` | `Nivel: DIFICIL (700 mg)` | Mudança de nível |
+| 4,0 s | `1` | `Nivel: FACIL (300 mg)` | Mudança de nível |
+| 5,6 s | `2` | `Nivel: NORMAL (500 mg)` | Mudança de nível |
+| 7,5 s | `j` | `Jogo NORMAL (500 mg): 3, 2, 1...` | Início do jogo |
+| 10,1 s | — | `[INICIO]` | Contagem de ~3 s (18 blocos) |
+| 30,1 s | — | `[TEMPO ESGOTADO]` | Limite de 20 s (125 blocos: 2897 → 3022) |
+| 33,1 s | — | `[MENU]` | Volta ao menu ao fim de 16 blocos (~2,6 s) |
+
+Em repouso, o RMS total ficou à volta de 15 a 20 mg e a numeração dos blocos subiu cerca de 6 por segundo (160 ms por bloco). O `DMA_desc=1` mostra que, desde o arranque, uma metade do DMA foi descartada uma vez; não se repetiu durante o teste.
+
+Falta ainda: o gráfico com a sequência de demonstração (repouso, abanar fraco, abanar forte, jogo até rebentar), feito com `grafico_vibracao.py`.
