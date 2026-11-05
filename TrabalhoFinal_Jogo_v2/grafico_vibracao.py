@@ -147,8 +147,14 @@ def main():
         return
 
     # Tempo a partir do numero do bloco (cada bloco = 160 ms).
-    bloco0 = dados[0][0]
-    tempo = [(d[0] - bloco0) * T_BLOCO_S for d in dados]
+    # Se a numeracao voltar atras (reset da placa a meio), o tempo continua
+    # a contar a partir do ponto anterior, como se fossem 2 blocos.
+    tempo = [0.0]
+    for anterior, atual in zip(dados, dados[1:]):
+        passo = atual[0] - anterior[0]
+        if passo <= 0:
+            passo = 2
+        tempo.append(tempo[-1] + passo * T_BLOCO_S)
 
     base = "vibracao_" + datetime.now().strftime("%Y%m%d_%H%M%S")
     grava_csv(base + ".csv", tempo, dados)
