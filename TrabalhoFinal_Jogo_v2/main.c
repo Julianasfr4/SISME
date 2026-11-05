@@ -16,7 +16,7 @@
  *   1) Placa parada: o LCD mostra "ABANA P/ JOGAR" e a leitura do sensor em direto.
  *   2) Ao abanar (Med5 >= 120 mg) ou ao carregar no botão SW5, o jogo arranca diretamente!
  *   3) O objetivo é rebentar o balão (500 mg) no menor tempo possível (máx. 20 s).
- *   4) Quando rebenta, dá-se a explosão "POP!", o LED PB1 acende e o recorde fica guardado em RAM.
+ *   4) Quando rebenta, dá-se a explosão "POP!" e o LED PB1 acende.
  *   5) Após ~2.6 s, volta automaticamente ao ecrã pronto para jogar novamente.
  *
  * Periféricos e Extras implementados:
@@ -109,13 +109,7 @@
 // Posições no menu e ecrã
 #define MENU_Y0              36U  // primeira opção do menu
 #define MENU_PASSO           26U  // espaçamento entre opções
-#define MENU_REC_X           31U  // x do recorde no menu
-#define MENU_REC_Y          114U // y do recorde no menu
-#define MENU_VALOR_Y         128U // y da leitura do sensor no menu
-#define MENU_RODAPE_Y        142U // y da mensagem segura SW5
-
-#define JOGO_REC_X           58U  // x do recorde no jogo
-#define JOGO_INFO_Y          53U  // y da dificuldade e recorde no jogo
+#define JOGO_INFO_Y          53U  // y da escala da barra no jogo
 #define JOGO_VALOR_Y         41U  // y do valor em mg e g no jogo
 #define ESTADO_Y             29U  // y da mensagem de estado (VAI! ABANA!)
 #define TEMPO_Y              19U  // y do cronómetro
@@ -373,7 +367,6 @@ static uint8_t blocos_rebou = 0U;
 
 static uint8_t estado_jogo = JOGO_ESPERA;
 static uint32_t tempo_jogo_blocos = 0U;
-static uint32_t recorde_blocos = 0U; // melhor tempo em blocos (0 = nenhum)
 static uint8_t pode_rebentar = 1U;
 
 // Flags das interrupções
@@ -418,23 +411,10 @@ static uint8_t Comprimento(const char *texto) {
     return n;
 }
 
-// Mostrar limiar e recorde no ecrã
-static void MostraRecorde(void) {
-
-    char texto[20];
-    uint32_t decimas = (recorde_blocos * JOGO_MS_POR_BLOCO) / 100U;
-
-    lcd_draw_string(10U, JOGO_INFO_Y, (unsigned char *)"LIM: 500mg", LCD_CINZA, 1U);
-
-    if (recorde_blocos == 0U) {
-        snprintf(texto, sizeof(texto), "REC: --.- s");
-    }
-    else {
-        snprintf(texto, sizeof(texto), "REC: %02lu.%lu s",
-                 (unsigned long)(decimas / 10U),
-                 (unsigned long)(decimas % 10U));
-    }
-    lcd_draw_string(62U, JOGO_INFO_Y, (unsigned char *)texto, LCD_CIANO, 1U);
+// Mostrar escala da barra no ecrã (0 a 500 mg)
+static void MostraEscalaBarra(void) {
+    lcd_draw_string(12U, JOGO_INFO_Y, (unsigned char *)"0", LCD_CINZA, 1U);
+    lcd_draw_string(76U, JOGO_INFO_Y, (unsigned char *)"500 mg", LCD_CINZA, 1U);
 }
 
 // Desenhar cabeçalho comum a todas as páginas
@@ -753,7 +733,7 @@ static void DesenhaEcraJogo(void) {
     MostraCronometro();
     MostraEstado("ABANA P/ JOGAR", LCD_AMARELO);
     MostraValorJogo(0U);
-    MostraRecorde();
+    MostraEscalaBarra();
 
     // Moldura da barra
     lcd_draw_fillrect(10U, 70U, 108U, 1U, LCD_BRANCO);
@@ -845,20 +825,10 @@ static uint8_t AtualizaJogo(uint32_t rms_mediana_mg) {
             AtualizaPWM(0U);
             DesenhaExplosao();
 
-            if ((recorde_blocos == 0U) || (tempo_jogo_blocos < recorde_blocos)) {
-                recorde_blocos = tempo_jogo_blocos;
-                MostraEstado("NOVO RECORDE!", LCD_CIANO);
-                MostraRecorde();
-                snprintf(msg, sizeof(msg), "NOVO RECORDE: %02lu.%lu s!\r\n",
-                         (unsigned long)((tempo_jogo_blocos * JOGO_MS_POR_BLOCO) / 1000U),
-                         (unsigned long)(((tempo_jogo_blocos * JOGO_MS_POR_BLOCO) % 1000U) / 100U));
-            }
-            else {
-                MostraEstado("REBOU!", LCD_VERMELHO);
-                snprintf(msg, sizeof(msg), "Rebentou em %02lu.%lu s!\r\n",
-                         (unsigned long)((tempo_jogo_blocos * JOGO_MS_POR_BLOCO) / 1000U),
-                         (unsigned long)(((tempo_jogo_blocos * JOGO_MS_POR_BLOCO) % 1000U) / 100U));
-            }
+            MostraEstado("REBOU!", LCD_VERMELHO);
+            snprintf(msg, sizeof(msg), "Rebentou em %02lu.%lu s!\r\n",
+                     (unsigned long)((tempo_jogo_blocos * JOGO_MS_POR_BLOCO) / 1000U),
+                     (unsigned long)(((tempo_jogo_blocos * JOGO_MS_POR_BLOCO) % 1000U) / 100U));
             USART2_EnviaTexto(msg);
             return 1U; // rebentou
         }
@@ -1059,12 +1029,10 @@ void MostraBloco(uint8_t metade, uint32_t numero) {
         ultimo_aviso_dma = blocos_dma_descartados;
     }
 
-        if (evento == 1U) {
+    if (evento == 1U) {
         uint32_t t = (tempo_jogo_blocos * JOGO_MS_POR_BLOCO) / 100U;
-        uint32_t r = (recorde_blocos * JOGO_MS_POR_BLOCO) / 100U;
-        snprintf(mensagem, sizeof(mensagem), ">>> REBENTOU em %lu.%lu s | Recorde: %lu.%lu s\r\n",
-                 (unsigned long)(t / 10U), (unsigned long)(t % 10U),
-                 (unsigned long)(r / 10U), (unsigned long)(r % 10U));
+        snprintf(mensagem, sizeof(mensagem), ">>> REBENTOU em %lu.%lu s!\r\n",
+                 (unsigned long)(t / 10U), (unsigned long)(t % 10U));
         USART2_EnviaTexto(mensagem);
     }
 }
@@ -1075,16 +1043,11 @@ static void TrataComando(char c) {
     if ((c == '\r') || (c == '\n')) return;
 
     if ((c == 'h') || (c == '?')) {
-        USART2_EnviaTexto("Comandos: j = iniciar jogo | r = apagar recorde | h = ajuda\r\n");
+        USART2_EnviaTexto("Comandos: j = iniciar jogo | h = ajuda\r\n");
         return;
     }
 
     switch (c) {
-    case 'r':
-        recorde_blocos = 0U;
-        MostraRecorde();
-        USART2_EnviaTexto("Recorde apagado.\r\n");
-        break;
     case 'j':
         if (estado_jogo == JOGO_ESPERA) {
             IniciaJogo();
