@@ -24,21 +24,23 @@
 
  * DESAFIO DO BALAO:
 
- *   1) Placa parada: aparece "ABANA P/ JOGAR".
+ *   1) Ecra inicial (menu): escolher FACIL, NORMAL ou DIFICIL.
 
- *   2) Abanar (Med5 >= 120 mg) inicia o cronometro.
+ *      SW5: clique muda o nivel; segurar 1 s comeca o desafio.
+
+ *   2) Contagem 3, 2, 1 e depois "VAI! ABANA!": o cronometro comeca.
 
  *   3) Objetivo: rebentar o balao no menor tempo possivel (max. 20 s).
 
- *   4) O melhor tempo fica guardado como recorde (RAM), um por dificuldade.
+ *   4) No fim (POP ou tempo esgotado) volta ao menu.
 
  *
 
  * EXTRAS (aplicam NVIC, EXTI, USART RX e PWM):
 
- *   - SW5 (PA1, EXTI1): muda a dificuldade FACIL/NORMAL/DIFICIL (300/500/700 mg).
+ *   - SW5 (PA1, EXTI1): navega no menu (FACIL/NORMAL/DIFICIL = 300/500/700 mg).
 
- *   - Terminal (USART2 RX): h ajuda, r apaga recordes, 1/2/3 dificuldade.
+ *   - Terminal (USART2 RX): h ajuda, 1/2/3 nivel, j jogar, r apaga recordes.
 
  *   - LED PB0 (TIM3_CH3 em PWM): brilho proporcional a barra.
 
@@ -65,7 +67,6 @@
 #define BARRA_Y                   73U
 #define BARRA_LARGURA            104U
 #define BARRA_ALTURA               8U
-#define BARRA_RMS_MAX_MG        500U  // valor NORMAL; agora depende da dificuldade
 #define BARRA_RUIDO_REPOUSO_MG   35U
 #define BARRA_PERIODO_BLOCOS      2U  // 2 x 160 ms = 320 ms (jogo mais fluido)
 #define BARRA_DELTA_MIN_PX        3U
@@ -92,12 +93,8 @@
 #define REBENTAMENTO_BLOCOS       3U
 
 // Mostrar o rebentamento (ou o fim do tempo) durante 16 blocos (~2,6 s).
-// Apos esse periodo, o jogo volta ao ecra de espera.
+// Apos esse periodo, o jogo volta ao menu.
 #define REBOU_DURACAO_BLOCOS     16U
-
-// Evitar rebentamentos repetidos enquanto a vibracao continua muito alta.
-// Um novo rebentamento fica disponivel depois de Med5 descer ate 95 mg.
-#define REARME_AUTOMATICO_MG     95U
 
 // PB1: LED do rebentamento. Se for ativo a zero, usar 0U.
 #define LED_ATIVO_ALTO            1U
@@ -115,14 +112,27 @@
 // =====================================================
 // JOGO: DESAFIO DO BALAO
 // =====================================================
-#define JOGO_ESPERA   0U   // a espera que a placa seja abanada
+#define JOGO_MENU     0U   // ecra inicial: escolher o nivel
 #define JOGO_ATIVO    1U   // cronometro a contar
 #define JOGO_REBOU    2U   // balao rebentou: mostra o tempo
 #define JOGO_FIM      3U   // tempo esgotado sem rebentar
+#define JOGO_CONTAGEM 4U   // contagem 3, 2, 1 antes de comecar
 
 #define JOGO_LIMITE_BLOCOS  125U  // 125 x 160 ms = 20 s
 #define JOGO_MS_POR_BLOCO   160U  // 32 amostras / 200 Hz
-#define JOGO_INICIO_MG      NIVEL_MEDIA_ENTRA_MG
+#define CONTAGEM_BLOCOS      18U  // 3 x 6 blocos = ~3 s
+#define CONTAGEM_PASSO        6U  // ~1 s por numero
+
+// Botao SW5 no menu: largar antes de 1 s = clique; segurar 1 s = jogar.
+#define BOTAO_SEGURAR_BLOCOS  6U  // 6 x 160 ms = ~1 s
+#define BOTAO_DEBOUNCE_BLOCOS 2U  // ignora ressaltos durante 320 ms
+
+// Menu: tres caixas, uma por nivel.
+#define MENU_CAIXA_X         14U
+#define MENU_CAIXA_Y0        44U
+#define MENU_CAIXA_PASSO     28U
+#define MENU_CAIXA_LARGURA  100U
+#define MENU_CAIXA_ALTURA    22U
 
 // Zonas de cor da barra (em pixeis): verde, amarelo, vermelho.
 #define BARRA_ZONA_AMARELA   40U
@@ -610,10 +620,10 @@ static uint8_t barra_desenhada_px = 0U;
 static uint8_t balao_raio_desenhado = 0U;
 static uint8_t contador_rebentamento = 0U;
 static uint8_t blocos_rebou = 0U;
-static uint8_t pode_rebentar = 1U;
+static uint8_t blocos_contagem = 0U;
 
 // Estado do jogo e cronometro (contados em blocos de 160 ms).
-static uint8_t estado_jogo = JOGO_ESPERA;
+static uint8_t estado_jogo = JOGO_MENU;
 static uint32_t tempo_jogo_blocos = 0U;
 
 // Dificuldade: limiar de rebentamento = fim de escala da barra (mg).
@@ -629,6 +639,7 @@ static uint8_t dificuldade = DIF_NORMAL;
 #define LIMIAR_ATUAL_MG  (limiar_dificuldade_mg[dificuldade])
 
 // Recorde (melhor tempo) por dificuldade; 0 = ainda sem recorde.
+// Ja nao aparece no LCD: so no terminal e na mensagem "NOVO RECORDE!".
 static uint32_t recorde_blocos[NUM_DIFICULDADES] = {0U, 0U, 0U};
 
 // Marcas escritas pelas rotinas de interrupcao (stm32f10x_it.c).
@@ -654,69 +665,95 @@ static void MostraEstado(const char *texto, uint16_t cor)
                     (unsigned char *)texto, cor, 1U);
 }
 
-// Escreve um tempo em segundos com uma casa decimal: "T:05.4".
-// blocos == 0 com traco != 0 mostra "--.-" (recorde ainda vazio).
-static void EscreveTempo(uint8_t x, const char *rotulo,
-                         uint32_t blocos, uint8_t traco, uint16_t cor)
-{
-    char texto[12];
-    uint32_t decimas = (blocos * JOGO_MS_POR_BLOCO) / 100U;
-
-    if ((blocos == 0U) && (traco != 0U))
-    {
-        snprintf(texto, sizeof(texto), "%s--.-", rotulo);
-    }
-    else
-    {
-        snprintf(texto, sizeof(texto), "%s%02lu.%lu", rotulo,
-                 (unsigned long)(decimas / 10U),
-                 (unsigned long)(decimas % 10U));
-    }
-    lcd_draw_string(x, TEMPO_Y, (unsigned char *)texto, cor, 1U);
-}
-
+// Cronometro centrado no topo: "TEMPO: 05.4 s".
 static void MostraCronometro(void)
 {
-    EscreveTempo(10U, "T:", tempo_jogo_blocos, 0U, LCD_BRANCO);
+    char texto[16];
+    uint32_t decimas = (tempo_jogo_blocos * JOGO_MS_POR_BLOCO) / 100U;
+
+    snprintf(texto, sizeof(texto), "TEMPO: %02lu.%lu s",
+             (unsigned long)(decimas / 10U),
+             (unsigned long)(decimas % 10U));
+    lcd_draw_string(25U, TEMPO_Y, (unsigned char *)texto, LCD_BRANCO, 1U);
 }
 
-static void MostraRecorde(void)
+// Numero de caracteres de um texto curto (para centrar).
+static uint8_t Comprimento(const char *texto)
 {
-    EscreveTempo(70U, "REC:", recorde_blocos[dificuldade], 1U, LCD_CIANO);
-}
-
-// Nome da dificuldade, centrado entre o "0" e o fim de escala (y = 53).
-static void MostraDificuldade(void)
-{
-    const char *nome = nome_dificuldade[dificuldade];
     uint8_t n = 0U;
-
-    while (nome[n] != '\0')
+    while (texto[n] != '\0')
     {
         n++;
     }
-    lcd_draw_fillrect(18U, 53U, 62U, 8U, LCD_PRETO);
-    lcd_draw_string((uint8_t)(49U - n * 3U), 53U, (unsigned char *)nome,
-                    cor_dificuldade[dificuldade], 1U);
+    return n;
 }
 
-// Fim de escala da barra, por exemplo "500 mg".
-static void MostraEscala(void)
+// Nome do nivel escolhido, centrado por cima da barra (y = 53).
+static void MostraDificuldade(void)
 {
-    char texto[8];
-    snprintf(texto, sizeof(texto), "%3lu mg",
-             (unsigned long)LIMIAR_ATUAL_MG);
-    lcd_draw_string(82U, 53U, (unsigned char *)texto, LCD_BRANCO, 1U);
+    const char *nome = nome_dificuldade[dificuldade];
+    lcd_draw_string((uint8_t)(64U - Comprimento(nome) * 3U), 53U,
+                    (unsigned char *)nome, cor_dificuldade[dificuldade], 1U);
 }
 
-// Ecra de espera: dificuldade, escala, recorde e convite para jogar.
-static void AtualizaEcraEspera(void)
+// Titulo e linha laranja, iguais no menu e no jogo.
+static void DesenhaCabecalho(void)
 {
-    MostraDificuldade();
-    MostraEscala();
-    MostraRecorde();
+    lcd_draw_string(16U, 6U, (unsigned char *)"DESAFIO DO BALAO",
+                    LCD_AMARELO, 1U);
+    lcd_draw_fillrect(10U, 16U, 108U, 1U, LCD_LARANJA);
+}
 
-    MostraEstado("ABANA P/ JOGAR", LCD_BRANCO);
+// =====================================================
+// MENU INICIAL (pagina a parte)
+// =====================================================
+// Uma caixa por nivel. A escolhida fica preenchida com a sua cor e texto
+// preto; as outras ficam so com o contorno e o texto na cor do nivel.
+static void DesenhaOpcoes(void)
+{
+    for (uint8_t i = 0U; i < NUM_DIFICULDADES; i++)
+    {
+        uint8_t y = (uint8_t)(MENU_CAIXA_Y0 + i * MENU_CAIXA_PASSO);
+        uint16_t cor = cor_dificuldade[i];
+        uint16_t cor_texto = cor;
+        const char *nome = nome_dificuldade[i];
+
+        if (i == dificuldade)
+        {
+            lcd_draw_fillrect(MENU_CAIXA_X, y, MENU_CAIXA_LARGURA,
+                              MENU_CAIXA_ALTURA, cor);
+            cor_texto = LCD_PRETO;
+        }
+        else
+        {
+            lcd_draw_fillrect(MENU_CAIXA_X, y, MENU_CAIXA_LARGURA,
+                              MENU_CAIXA_ALTURA, LCD_PRETO);
+            lcd_draw_fillrect(MENU_CAIXA_X, y, MENU_CAIXA_LARGURA, 1U, cor);
+            lcd_draw_fillrect(MENU_CAIXA_X, (uint8_t)(y + MENU_CAIXA_ALTURA - 1U),
+                              MENU_CAIXA_LARGURA, 1U, cor);
+            lcd_draw_fillrect(MENU_CAIXA_X, y, 1U, MENU_CAIXA_ALTURA, cor);
+            lcd_draw_fillrect((uint8_t)(MENU_CAIXA_X + MENU_CAIXA_LARGURA - 1U), y,
+                              1U, MENU_CAIXA_ALTURA, cor);
+        }
+
+        // Tamanho 2: cada caracter ocupa 12 px de largura e 16 px de altura.
+        lcd_draw_string((uint8_t)(64U - Comprimento(nome) * 6U),
+                        (uint8_t)(y + 3U), (unsigned char *)nome,
+                        cor_texto, 2U);
+    }
+}
+
+static void DesenhaMenu(void)
+{
+    lcd_draw_fillrect(0U, 0U, 128U, 160U, LCD_PRETO);
+    DesenhaCabecalho();
+    lcd_draw_string(19U, 28U, (unsigned char *)"ESCOLHE O NIVEL",
+                    LCD_BRANCO, 1U);
+    DesenhaOpcoes();
+    lcd_draw_string(25U, 134U, (unsigned char *)"CLIQUE: MUDAR",
+                    LCD_CINZA, 1U);
+    lcd_draw_string(16U, 146U, (unsigned char *)"SEGURA 1s: JOGAR",
+                    LCD_CINZA, 1U);
 }
 
 // Escreve apenas quando ha uma mudanca de nivel (pouco trafego SPI).
@@ -1069,35 +1106,82 @@ static void Botao_EXTI_Config(void)
     EXTI_Init(&EXTI_InitStructure);
 }
 
+// =====================================================
+// ECRA DO JOGO
+// =====================================================
+// Pagina do desafio: cabecalho, cronometro, nivel, barra e balao.
+static void DesenhaEcraJogo(void)
+{
+    lcd_draw_fillrect(0U, 0U, 128U, 160U, LCD_PRETO);
+    DesenhaCabecalho();
+    MostraCronometro();
+    MostraDificuldade();
+
+    // Moldura fixa da barra. Interior: x=12..115, y=73..80.
+    lcd_draw_fillrect(10U, 70U, 108U, 1U, LCD_BRANCO);
+    lcd_draw_fillrect(10U, 83U, 108U, 1U, LCD_BRANCO);
+    lcd_draw_fillrect(10U, 71U, 1U, 12U, LCD_BRANCO);
+    lcd_draw_fillrect(117U, 71U, 1U, 12U, LCD_BRANCO);
+
+    // Balao inicial pequeno, com corda e brilho.
+    BalaoInicial();
+}
+
+// Sai do menu: limpa o estado da animacao e comeca a contagem 3, 2, 1.
+static void IniciaJogo(void)
+{
+    char mensagem[48];
+
+    estado_jogo = JOGO_CONTAGEM;
+    blocos_contagem = 0U;
+    tempo_jogo_blocos = 0U;
+    contador_rebentamento = 0U;
+    nivel_vibracao = VIB_BAIXA;
+    barra_visual_px = 0U;
+    barra_desenhada_px = 0U;
+    balao_raio_desenhado = 0U;
+    AtualizaLED(0U);
+    AtualizaPWM(0U);
+
+    DesenhaEcraJogo();
+    MostraEstado("PREPARA... 3", LCD_BRANCO);
+
+    snprintf(mensagem, sizeof(mensagem), "Jogo %s (%lu mg): 3, 2, 1...\r\n",
+             nome_dificuldade[dificuldade],
+             (unsigned long)LIMIAR_ATUAL_MG);
+    USART2_EnviaTexto(mensagem);
+}
+
 // Maquina de estados do jogo, chamada em todos os blocos de 160 ms.
-//   ESPERA --(abanar, Med5 >= 120 mg)--> ATIVO
-//   ATIVO  --(rebenta)------------------> REBOU --(~2,6 s)--> ESPERA
-//   ATIVO  --(20 s sem rebentar)--------> FIM   --(~2,6 s)--> ESPERA
-// Rebenta quando Med5 >= 500 mg em 3 blocos seguidos E a barra e o balao
-// ja estao no maximo. Um novo jogo so pode comecar depois de Med5 descer
-// ate 95 mg (rearme), para nao arrancar logo a seguir ao anterior.
+//   MENU     --(segurar SW5 1 s, ou 'j')--> CONTAGEM (IniciaJogo, no main)
+//   CONTAGEM --(~3 s)-----------------------> ATIVO
+//   ATIVO    --(rebenta)--------------------> REBOU --(~2,6 s)--> MENU
+//   ATIVO    --(20 s sem rebentar)----------> FIM   --(~2,6 s)--> MENU
+// Rebenta quando Med5 >= limiar do nivel em 3 blocos seguidos E a barra e
+// o balao ja estao no maximo.
 // Nunca bloqueia: o ADC/DMA continuam a adquirir durante todo o jogo.
-// Eventos: 0 nenhum; 1 rebentou; 2 voltou a espera; 3 inicio; 4 tempo esgotado.
+// Eventos: 0 nenhum; 1 rebentou; 2 voltou ao menu; 3 inicio; 4 tempo esgotado.
 static uint8_t AtualizaJogo(uint32_t rms_mediana_mg)
 {
-    if ((pode_rebentar == 0U) &&
-        (rms_mediana_mg <= REARME_AUTOMATICO_MG))
-    {
-        pode_rebentar = 1U;
-    }
-
     switch (estado_jogo)
     {
-    case JOGO_ESPERA:
-        if ((pode_rebentar != 0U) && (rms_mediana_mg >= JOGO_INICIO_MG))
+    case JOGO_MENU:
+        // O menu so muda com o botao ou com comandos (tratados no main).
+        return 0U;
+
+    case JOGO_CONTAGEM:
+        blocos_contagem++;
+        if (blocos_contagem >= CONTAGEM_BLOCOS)
         {
             estado_jogo = JOGO_ATIVO;
-            tempo_jogo_blocos = 0U;
-            contador_rebentamento = 0U;
-            nivel_vibracao = VIB_BAIXA;
-            MostraCronometro();
             MostraEstado("VAI! ABANA!", LCD_LARANJA);
             return 3U;
+        }
+        if ((blocos_contagem % CONTAGEM_PASSO) == 0U)
+        {
+            // 6 blocos -> "2", 12 blocos -> "1"
+            MostraEstado((blocos_contagem < 2U * CONTAGEM_PASSO) ?
+                         "PREPARA... 2" : "PREPARA... 1", LCD_BRANCO);
         }
         return 0U;
 
@@ -1109,7 +1193,7 @@ static uint8_t AtualizaJogo(uint32_t rms_mediana_mg)
         {
             estado_jogo = JOGO_FIM;
             blocos_rebou = 0U;
-            pode_rebentar = 0U;
+            AtualizaPWM(0U);
             MostraEstado("TEMPO ESGOTADO", LCD_VERMELHO);
             return 4U;
         }
@@ -1132,7 +1216,6 @@ static uint8_t AtualizaJogo(uint32_t rms_mediana_mg)
             (balao_raio_desenhado == BALAO_RAIO_MAX))
         {
             estado_jogo = JOGO_REBOU;
-            pode_rebentar = 0U;
             blocos_rebou = 0U;
             contador_rebentamento = 0U;
             AtualizaLED(1U);
@@ -1152,7 +1235,6 @@ static uint8_t AtualizaJogo(uint32_t rms_mediana_mg)
                 (tempo_jogo_blocos < recorde_blocos[dificuldade]))
             {
                 recorde_blocos[dificuldade] = tempo_jogo_blocos;
-                MostraRecorde();
                 MostraEstado("NOVO RECORDE!", LCD_CIANO);
             }
             else
@@ -1165,24 +1247,15 @@ static uint8_t AtualizaJogo(uint32_t rms_mediana_mg)
 
     default:
         // JOGO_REBOU ou JOGO_FIM: manter o resultado no ecra durante
-        // REBOU_DURACAO_BLOCOS, sem parar a aquisicao.
+        // REBOU_DURACAO_BLOCOS, sem parar a aquisicao. Depois, menu.
         blocos_rebou++;
         if (blocos_rebou >= REBOU_DURACAO_BLOCOS)
         {
-            estado_jogo = JOGO_ESPERA;
+            estado_jogo = JOGO_MENU;
             blocos_rebou = 0U;
             AtualizaLED(0U);
-
-            LimpaZonaBalao();
-            lcd_draw_fillrect(BARRA_X, BARRA_Y,
-                              BARRA_LARGURA, BARRA_ALTURA, LCD_PRETO);
-            barra_visual_px = 0U;
-            barra_desenhada_px = 0U;
-            nivel_vibracao = VIB_BAIXA;
-            balao_raio_desenhado = 0U;
             AtualizaPWM(0U);
-            BalaoInicial();
-            AtualizaEcraEspera();
+            DesenhaMenu();
             return 2U;
         }
         return 0U;
@@ -1357,7 +1430,7 @@ void MostraBloco(uint8_t metade, uint32_t numero)
     desenhou_lcd = (uint8_t)(mudou_nivel || mudou_animacao);
 
     if (evento == 1U)       marca = " [REBOU]";
-    else if (evento == 2U)  marca = " [ESPERA]";
+    else if (evento == 2U)  marca = " [MENU]";
     else if (evento == 3U)  marca = " [INICIO]";
     else if (evento == 4U)  marca = " [TEMPO ESGOTADO]";
     else if (desenhou_lcd)  marca = " [LCD]";
@@ -1415,8 +1488,8 @@ void MostraBloco(uint8_t metade, uint32_t numero)
 
 static void MostraAjuda(void)
 {
-    USART2_EnviaTexto("Comandos: h ajuda | r apaga recordes | 1 facil | 2 normal | 3 dificil\r\n");
-    USART2_EnviaTexto("Botao SW5: muda a dificuldade (so na espera)\r\n");
+    USART2_EnviaTexto("Comandos (no menu): h ajuda | 1 facil | 2 normal | 3 dificil | j jogar | r apaga recordes\r\n");
+    USART2_EnviaTexto("Botao SW5 no menu: clique muda o nivel, segurar 1 s comeca\r\n");
 }
 
 static void MudaDificuldade(uint8_t nova)
@@ -1424,19 +1497,61 @@ static void MudaDificuldade(uint8_t nova)
     char mensagem[48];
 
     dificuldade = nova;
-    AtualizaEcraEspera();
-    snprintf(mensagem, sizeof(mensagem), "Dificuldade: %s (%lu mg)\r\n",
+    DesenhaOpcoes();
+    snprintf(mensagem, sizeof(mensagem), "Nivel: %s (%lu mg)\r\n",
              nome_dificuldade[dificuldade],
              (unsigned long)LIMIAR_ATUAL_MG);
     USART2_EnviaTexto(mensagem);
 }
 
-// SW5: na espera, passa para a dificuldade seguinte.
-static void TrataBotao(void)
+// SW5 no menu. A interrupcao (EXTI1) so avisa que o botao foi carregado;
+// em cada bloco de 160 ms o main le o pino PA1 para saber se ja foi largado.
+//   largado antes de 1 s -> clique: nivel seguinte
+//   ainda carregado ao fim de 1 s -> comeca o jogo
+// Fora do menu o botao e ignorado.
+static uint8_t botao_em_espera = 0U;
+static uint32_t bloco_inicio_botao = 0U;
+static uint32_t ultimo_bloco_botao = 0U;
+
+static void BotaoCarregado(uint32_t numero_bloco)
 {
-    if (estado_jogo == JOGO_ESPERA)
+    if ((estado_jogo != JOGO_MENU) || (botao_em_espera != 0U))
     {
+        return;
+    }
+    // Debounce: ignora ressaltos logo a seguir ao ultimo toque.
+    if ((numero_bloco - ultimo_bloco_botao) < BOTAO_DEBOUNCE_BLOCOS)
+    {
+        return;
+    }
+    botao_em_espera = 1U;
+    bloco_inicio_botao = numero_bloco;
+}
+
+static void VerificaBotao(uint32_t numero_bloco)
+{
+    if (botao_em_espera == 0U)
+    {
+        return;
+    }
+    if (estado_jogo != JOGO_MENU)
+    {
+        botao_em_espera = 0U;
+        return;
+    }
+
+    // Ativo a zero: Bit_SET = botao largado.
+    if (GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_1) == Bit_SET)
+    {
+        botao_em_espera = 0U;
+        ultimo_bloco_botao = numero_bloco;
         MudaDificuldade((uint8_t)((dificuldade + 1U) % NUM_DIFICULDADES));
+    }
+    else if ((numero_bloco - bloco_inicio_botao) >= BOTAO_SEGURAR_BLOCOS)
+    {
+        botao_em_espera = 0U;
+        ultimo_bloco_botao = numero_bloco;
+        IniciaJogo();
     }
 }
 
@@ -1452,9 +1567,9 @@ static void TrataComando(char c)
         MostraAjuda();
         return;
     }
-    if (estado_jogo != JOGO_ESPERA)
+    if (estado_jogo != JOGO_MENU)
     {
-        USART2_EnviaTexto("Comando so na espera (fim do jogo).\r\n");
+        USART2_EnviaTexto("Comando so no menu (fim do jogo).\r\n");
         return;
     }
 
@@ -1465,13 +1580,15 @@ static void TrataComando(char c)
         {
             recorde_blocos[i] = 0U;
         }
-        MostraRecorde();
         USART2_EnviaTexto("Recordes apagados.\r\n");
         break;
     case '1':
     case '2':
     case '3':
         MudaDificuldade((uint8_t)(c - '1'));
+        break;
+    case 'j':
+        IniciaJogo();
         break;
     default:
         USART2_EnviaTexto("Comando desconhecido (h = ajuda).\r\n");
@@ -1505,22 +1622,8 @@ int main(void)
 
     lcd_init();
 
-    // O lcd_init ja apaga todo o LCD. Desenhar so a interface estatica.
-    lcd_draw_string(16, 6, (unsigned char *)"DESAFIO DO BALAO",
-                    LCD_AMARELO, 1);
-    lcd_draw_fillrect(10, 16, 108, 1, LCD_LARANJA);
-    MostraCronometro();
-    lcd_draw_string(10, 53, (unsigned char *)"0", LCD_BRANCO, 1);
-    AtualizaEcraEspera();  // dificuldade, escala, recorde, mensagem
-
-    // Moldura fixa da barra. Interior: x=12..115, y=73..80.
-    lcd_draw_fillrect(10, 70, 108, 1, LCD_BRANCO);
-    lcd_draw_fillrect(10, 83, 108, 1, LCD_BRANCO);
-    lcd_draw_fillrect(10, 71, 1, 12, LCD_BRANCO);
-    lcd_draw_fillrect(117, 71, 1, 12, LCD_BRANCO);
-
-    // Balao inicial pequeno, com corda e brilho.
-    BalaoInicial();
+    // Primeira pagina: menu para escolher o nivel.
+    DesenhaMenu();
 
     // ================================================
 
@@ -1553,7 +1656,7 @@ int main(void)
     USART2_EnviaTexto("ADC + DMA (IRQ HT/TC) + TIM3 + LCD\r\n");
 
     USART2_EnviaTexto("200Hz | Med5 | BAIXA/MEDIA/ALTA | POP=300/500/700mg\r\n");
-    USART2_EnviaTexto("DESAFIO DO BALAO: abana para comecar, rebenta em menos de 20 s\r\n");
+    USART2_EnviaTexto("DESAFIO DO BALAO: escolhe o nivel, segura SW5 1 s e rebenta em menos de 20 s\r\n");
     USART2_EnviaTexto("LCD e USART: eventos + 1 linha / 2 blocos; DMA_desc=descartes\r\n");
     MostraAjuda();
 
@@ -1594,16 +1697,10 @@ int main(void)
         comando_usart = 0;
         __enable_irq();
 
-        // Botao SW5 (EXTI1). Debounce: ignora toques a menos de
-        // 2 blocos (320 ms) do anterior.
+        // Botao SW5 (EXTI1): marca o inicio do toque (so no menu).
         if (botao != 0U)
         {
-            static uint32_t ultimo_bloco_botao = 0U;
-            if ((numero_bloco - ultimo_bloco_botao) >= 2U)
-            {
-                ultimo_bloco_botao = numero_bloco;
-                TrataBotao();
-            }
+            BotaoCarregado(numero_bloco);
         }
 
         // Comando recebido pelo terminal (USART2 RX).
@@ -1624,6 +1721,12 @@ int main(void)
         {
             numero_bloco++;
             MostraBloco(1, numero_bloco);
+        }
+
+        // Uma vez por bloco: clique (largou) ou segurar 1 s (jogar)?
+        if (pendentes != 0U)
+        {
+            VerificaBotao(numero_bloco);
         }
 
     }
