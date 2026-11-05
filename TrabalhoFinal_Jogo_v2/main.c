@@ -4,7 +4,7 @@
  * Ema Mota
  *
  * Sistema de Aquisição e Análise de Vibrações
- * VERSÃO JOGO - ADC + DMA (com interrupção) + TIM3 + LCD + DESAFIO DO BALÃO
+ * ADC + DMA (com interrupção) + TIM3 + LCD: MONITOR DE VIBRAÇÕES
  * 
  * STM32F103RBT6
  * ADXL337:
@@ -12,19 +12,20 @@
  *   Y -> PC1 -> ADC1_IN11
  *   Z -> PC0 -> ADC1_IN10
  *
- * Funcionamento do Jogo:
- *   1) Placa parada: o LCD mostra "ABANA P/ JOGAR" e a leitura do sensor em direto.
- *   2) Ao abanar (Med5 >= 120 mg) ou ao carregar no botão SW5, o jogo arranca diretamente!
- *   3) O objetivo é rebentar o balão (500 mg) no menor tempo possível (máx. 20 s).
- *   4) Quando rebenta, dá-se a explosão "POP!" e o LED PB1 acende.
- *   5) Após ~2.6 s, volta automaticamente ao ecrã pronto para jogar novamente.
+ * Funcionamento (monitorização de vibrações):
+ *   1) O LCD mostra em direto a vibração filtrada (Med5) em mg e em g.
+ *   2) Nível BAIXA / MÉDIA / ALTA com histerese (120/95 mg e 260/230 mg).
+ *   3) Uma barra (0 a 500 mg) e um balão crescem com a vibração e voltam
+ *      devagar ao estado inicial quando ela diminui.
+ *   4) LED PB0: brilho proporcional à barra (PWM). LED PB1: acende em ALTA.
+ *   5) Botão SW5 ou 'p' no terminal: pausa / retoma o ecrã.
  *
  * Periféricos e Extras implementados:
  *   - ADC1 + DMA1 em modo circular com interrupções HT e TC via NVIC.
  *   - TIM3 a 200 Hz: trigger TRGO para o ADC e PWM no LED PB0 (Canal 3).
  *   - EXTI1: botão SW5 (PA1) com interrupção externa.
  *   - USART2: comunicação série assíncrona a 9600 bps com receção por interrupção (RXNE).
- *   - SPI1: LCD ST7735 com valores em tempo real (mg e g), barra gráfica e balão dinâmico.
+ *   - SPI1: LCD ST7735 com valores em tempo real (mg e g), nível, barra e balão.
  */
 
 #include "stm32f10x.h"
@@ -60,13 +61,8 @@
 // Limiares de vibração em mg
 #define NIVEL_MEDIA_ENTRA_MG    120U
 #define NIVEL_MEDIA_SAI_MG       95U
-#define REARME_AUTOMATICO_MG     95U // rearme ao pousar a placa
 #define NIVEL_ALTA_ENTRA_MG     260U
 #define NIVEL_ALTA_SAI_MG       230U
-
-// Condições de rebentamento do balão
-#define REBENTAMENTO_BLOCOS       3U // blocos seguidos acima do limiar
-#define REBOU_DURACAO_BLOCOS     16U // tempo de espera após rebentar (~2.6 s)
 
 #define LED_ATIVO_ALTO            1U // 1 = ativo a nível alto
 
@@ -91,28 +87,13 @@
 #define LCD_LARANJA  0xFD20U
 #endif
 
-// Estados do jogo
-#define JOGO_ESPERA   0U // parado à espera: "ABANA P/ JOGAR"
-#define JOGO_ATIVO    1U // a jogar: cronómetro a contar
-#define JOGO_REBOU    2U // balão rebentou (mostra POP!)
-#define JOGO_FIM      3U // tempo esgotado (20 segundos)
+// Escala da barra e do balão
+#define ESCALA_BARRA_MG     500U // barra cheia aos 500 mg
 
-#define JOGO_LIMITE_BLOCOS  125U // 125 * 160 ms = 20 s
-#define JOGO_MS_POR_BLOCO   160U // 32 amostras / 200 Hz = 160 ms
-#define JOGO_INICIO_MG      120U // vibração mínima para arrancar o jogo (120 mg)
-#define LIMIAR_REBENTAMENTO_MG 500U // limiar fixo de 500 mg para rebentar
-
-// Parâmetros do botão SW5
-#define BOTAO_SEGURAR_BLOCOS  6U // 6 x 160 ms = ~1 s para começar o jogo
-#define BOTAO_DEBOUNCE_BLOCOS 2U // debounce de 320 ms
-
-// Posições no menu e ecrã
-#define MENU_Y0              36U  // primeira opção do menu
-#define MENU_PASSO           26U  // espaçamento entre opções
-#define JOGO_INFO_Y          53U  // y da escala da barra no jogo
-#define JOGO_VALOR_Y         41U  // y do valor em mg e g no jogo
-#define ESTADO_Y             29U  // y da mensagem de estado (VAI! ABANA!)
-#define TEMPO_Y              19U  // y do cronómetro
+// Posições no ecrã
+#define ESCALA_Y             53U  // y da escala da barra (0 ... 500 mg)
+#define VALOR_Y              41U  // y do valor em mg e g
+#define ESTADO_Y             29U  // y do nível (VIB: BAIXA / MEDIA / ALTA)
 
 // Zonas de cor da barra
 #define BARRA_ZONA_AMARELA   40U
@@ -356,18 +337,14 @@ static uint32_t MedianaMovel5(uint32_t rms_atual_mg) {
     return ordenado[2]; // devolve o valor do meio
 }
 
-// Variáveis da animação e do jogo
+// Variáveis da animação
 static void DesenhaCorda(uint8_t raio_antigo, uint8_t raio_novo);
+static void AtualizaLED(uint8_t ligado);
 
 static uint8_t barra_visual_px = 0U;
 static uint8_t barra_desenhada_px = 0U;
 static uint8_t balao_raio_desenhado = 0U;
-static uint8_t contador_rebentamento = 0U;
-static uint8_t blocos_rebou = 0U;
-
-static uint8_t estado_jogo = JOGO_ESPERA;
-static uint32_t tempo_jogo_blocos = 0U;
-static uint8_t pode_rebentar = 1U;
+static uint8_t pausa = 0U; // 1 = ecrã parado (SW5 ou 'p')
 
 // Flags das interrupções
 volatile uint8_t botao_pressionado = 0U; // botão SW5 (EXTI1)
@@ -389,18 +366,6 @@ static void MostraEstado(const char *texto, uint16_t cor) {
     lcd_draw_string((uint8_t)(64U - n * 3U), ESTADO_Y, (unsigned char *)texto, cor, 1U);
 }
 
-// Mostrar cronómetro no ecrã
-static void MostraCronometro(void) {
-
-    char texto[20];
-    uint32_t decimas = (tempo_jogo_blocos * JOGO_MS_POR_BLOCO) / 100U;
-
-    snprintf(texto, sizeof(texto), "TEMPO: %02lu.%lu s",
-             (unsigned long)(decimas / 10U),
-             (unsigned long)(decimas % 10U));
-    lcd_draw_string(25U, TEMPO_Y, (unsigned char *)texto, LCD_BRANCO, 1U);
-}
-
 // Devolve o comprimento de uma string
 static uint8_t Comprimento(const char *texto) {
 
@@ -413,13 +378,13 @@ static uint8_t Comprimento(const char *texto) {
 
 // Mostrar escala da barra no ecrã (0 a 500 mg)
 static void MostraEscalaBarra(void) {
-    lcd_draw_string(12U, JOGO_INFO_Y, (unsigned char *)"0", LCD_CINZA, 1U);
-    lcd_draw_string(76U, JOGO_INFO_Y, (unsigned char *)"500 mg", LCD_CINZA, 1U);
+    lcd_draw_string(12U, ESCALA_Y, (unsigned char *)"0", LCD_CINZA, 1U);
+    lcd_draw_string(76U, ESCALA_Y, (unsigned char *)"500 mg", LCD_CINZA, 1U);
 }
 
-// Desenhar cabeçalho comum a todas as páginas
+// Desenhar cabeçalho
 static void DesenhaCabecalho(void) {
-    lcd_draw_string(16U, 6U, (unsigned char *)"DESAFIO DO BALAO", LCD_AMARELO, 1U);
+    lcd_draw_string(16U, 6U, (unsigned char *)"MONITOR VIBRACAO", LCD_AMARELO, 1U);
     lcd_draw_fillrect(10U, 15U, 108U, 1U, LCD_LARANJA);
 }
 
@@ -431,8 +396,8 @@ static uint16_t CorPorVibracao(uint32_t valor_mg) {
     return LCD_VERDE;                                          // repouso / baixo
 }
 
-// Mostrar valor da aceleração em mg e g durante o jogo
-static void MostraValorJogo(uint32_t valor_mg) {
+// Mostrar valor da vibração em mg e g
+static void MostraValor(uint32_t valor_mg) {
 
     char texto[32];
     uint8_t n;
@@ -440,14 +405,16 @@ static void MostraValorJogo(uint32_t valor_mg) {
     uint32_t dec_g = (valor_mg % 1000U) / 10U; // centésimas de g
     uint16_t cor   = CorPorVibracao(valor_mg);
 
-    snprintf(texto, sizeof(texto), "VIB: %lu mg (%lu.%02lu g)",
+    // "1234 mg (1.23 g)": cabe nos 128 px do ecrã
+    snprintf(texto, sizeof(texto), "%lu mg (%lu.%02lu g)",
              (unsigned long)valor_mg,
              (unsigned long)int_g,
              (unsigned long)dec_g);
 
     n = Comprimento(texto);
-    lcd_draw_fillrect(2U, (uint8_t)(JOGO_VALOR_Y - 1U), 124U, 10U, LCD_PRETO); // limpa a linha
-    lcd_draw_string((uint8_t)((128U - n * 6U) / 2U), JOGO_VALOR_Y, (unsigned char *)texto, cor, 1U); // centra o texto
+    if (n > 21U) n = 21U; // nunca mais largo do que o ecrã
+    lcd_draw_fillrect(2U, (uint8_t)(VALOR_Y - 1U), 124U, 10U, LCD_PRETO); // limpa a linha
+    lcd_draw_string((uint8_t)((128U - n * 6U) / 2U), VALOR_Y, (unsigned char *)texto, cor, 1U); // centra o texto
 }
 
 // Mostrar nível de vibração no ecrã
@@ -477,10 +444,6 @@ static uint8_t AtualizaNivel(uint32_t mediana_mg) {
 
     uint8_t novo = nivel_vibracao;
 
-    if ((estado_jogo != JOGO_ATIVO) || (tempo_jogo_blocos < 6U)) {
-        return 0U;
-    }
-
     if (nivel_vibracao == VIB_BAIXA) {
         if (mediana_mg >= NIVEL_ALTA_ENTRA_MG)       novo = VIB_ALTA;
         else if (mediana_mg >= NIVEL_MEDIA_ENTRA_MG) novo = VIB_MEDIA;
@@ -498,6 +461,7 @@ static uint8_t AtualizaNivel(uint32_t mediana_mg) {
 
     nivel_vibracao = novo;
     MostraNivelNoLCD(novo);
+    AtualizaLED(novo == VIB_ALTA); // LED PB1 acende em ALTA
     return 1U;
 }
 
@@ -505,12 +469,12 @@ static uint8_t AtualizaNivel(uint32_t mediana_mg) {
 static uint8_t AlvoBarra(uint32_t mediana_mg) {
 
     if (mediana_mg <= BARRA_RUIDO_REPOUSO_MG) return 0U;
-    if (mediana_mg >= LIMIAR_REBENTAMENTO_MG)        return BARRA_LARGURA;
+    if (mediana_mg >= ESCALA_BARRA_MG)        return BARRA_LARGURA;
 
     return (uint8_t)(
         ((mediana_mg - BARRA_RUIDO_REPOUSO_MG) * BARRA_LARGURA +
-         (LIMIAR_REBENTAMENTO_MG - BARRA_RUIDO_REPOUSO_MG) / 2U) /
-        (LIMIAR_REBENTAMENTO_MG - BARRA_RUIDO_REPOUSO_MG));
+         (ESCALA_BARRA_MG - BARRA_RUIDO_REPOUSO_MG) / 2U) /
+        (ESCALA_BARRA_MG - BARRA_RUIDO_REPOUSO_MG));
 }
 
 // Converter largura da barra em raio do balão
@@ -602,21 +566,6 @@ static void PintaBarra(uint8_t de, uint8_t ate) {
     }
 }
 
-// Desenhar explosão ("POP!")
-static void DesenhaExplosao(void) {
-
-    static const int8_t dx[12] = {-24, 20, -14, 26, -28, 8, -6, 22, -18, 4, 14, -26};
-    static const int8_t dy[12] = {-18, -14, 16, 6, -2, -24, 22, 20, 6, 14, -22, 18};
-
-    for (uint8_t i = 0U; i < 12U; i++) {
-        uint16_t cor = (i % 3U == 0U) ? LCD_AMARELO :
-                       ((i % 3U == 1U) ? LCD_VERMELHO : LCD_LARANJA);
-        lcd_draw_fillrect((uint8_t)((int16_t)BALAO_CX + dx[i] - 2),
-                          (uint8_t)((int16_t)BALAO_CY + dy[i] - 2), 5U, 3U, cor);
-    }
-    lcd_draw_string((uint8_t)(BALAO_CX - 23U), (uint8_t)(BALAO_CY - 7U), (unsigned char *)"POP!", LCD_BRANCO, 2U);
-}
-
 // Desenhar balão inicial pequeno
 static void BalaoInicial(void) {
 
@@ -643,7 +592,7 @@ static void DesenhaCorda(uint8_t raio_antigo, uint8_t raio_novo) {
     }
 }
 
-// Atualizar o LED PB1
+// Atualizar o LED PB1 (alerta de vibração ALTA)
 static void AtualizaLED(uint8_t ligado) {
 
     BitAction nivel = (ligado != 0U) ? Bit_SET : Bit_RESET;
@@ -725,14 +674,13 @@ static void Botao_EXTI_Config(void) {
     EXTI_Init(&EXTI_InitStructure);
 }
 
-// Desenhar o ecrã do jogo (ecrã único)
-static void DesenhaEcraJogo(void) {
+// Desenhar o ecrã (ecrã único)
+static void DesenhaEcra(void) {
 
     lcd_draw_fillrect(0U, 0U, 128U, 160U, LCD_PRETO);
     DesenhaCabecalho();
-    MostraCronometro();
-    MostraEstado("ABANA P/ JOGAR", LCD_AMARELO);
-    MostraValorJogo(0U);
+    MostraNivelNoLCD(nivel_vibracao);
+    MostraValor(0U);
     MostraEscalaBarra();
 
     // Moldura da barra
@@ -744,113 +692,17 @@ static void DesenhaEcraJogo(void) {
     BalaoInicial(); // desenha o balão inicial
 }
 
-// Iniciar o jogo
-static void IniciaJogo(void) {
+// Pausa / retoma o ecrã (botão SW5 ou 'p' no terminal)
+static void AlternaPausa(void) {
 
-    estado_jogo = JOGO_ATIVO;
-    tempo_jogo_blocos = 0U;
-    contador_rebentamento = 0U;
-    nivel_vibracao = VIB_BAIXA;
-    barra_visual_px = 0U;
-    barra_desenhada_px = 0U;
-    balao_raio_desenhado = 0U;
-    AtualizaLED(0U);
-    AtualizaPWM(0U);
-
-    MostraCronometro();
-    MostraEstado("VAI! ABANA!", LCD_LARANJA);
-    USART2_EnviaTexto("Inicio do jogo: VAI! ABANA!\r\n");
-}
-
-// Máquina de estados do jogo
-static uint8_t AtualizaJogo(uint32_t rms_mediana_mg) {
-
-    if ((pode_rebentar == 0U) && (rms_mediana_mg <= REARME_AUTOMATICO_MG)) {
-        pode_rebentar = 1U;
+    pausa = (uint8_t)!pausa;
+    if (pausa != 0U) {
+        MostraEstado("PAUSA", LCD_CIANO);
+        USART2_EnviaTexto("Ecra em pausa (SW5 ou p para retomar)\r\n");
     }
-
-    switch (estado_jogo) {
-    case JOGO_ESPERA:
-        // Começa ao abanar com força (>= 120 mg) ou se carregar no botão SW5
-        if (((pode_rebentar != 0U) && (rms_mediana_mg >= JOGO_INICIO_MG)) ||
-            (botao_pressionado != 0U))
-        {
-            botao_pressionado = 0U;
-            IniciaJogo();
-            return 3U; // início
-        }
-        return 0U;
-
-    case JOGO_ATIVO:
-        tempo_jogo_blocos++;
-        MostraCronometro();
-
-        if (tempo_jogo_blocos >= JOGO_LIMITE_BLOCOS) {
-            estado_jogo = JOGO_FIM;
-            blocos_rebou = 0U;
-            pode_rebentar = 0U;
-            AtualizaPWM(0U);
-            MostraEstado("TEMPO ESGOTADO", LCD_VERMELHO);
-            USART2_EnviaTexto("Fim do jogo: Tempo esgotado (20 s)!\r\n");
-            return 4U; // tempo esgotado
-        }
-
-        if (rms_mediana_mg >= LIMIAR_REBENTAMENTO_MG) {
-            if (contador_rebentamento < REBENTAMENTO_BLOCOS) {
-                contador_rebentamento++;
-            }
-        }
-        else {
-            contador_rebentamento = 0U;
-        }
-
-        if ((contador_rebentamento >= REBENTAMENTO_BLOCOS) &&
-            (barra_visual_px == BARRA_LARGURA) &&
-            (barra_desenhada_px == BARRA_LARGURA) &&
-            (balao_raio_desenhado == BALAO_RAIO_MAX))
-        {
-            char msg[48];
-            estado_jogo = JOGO_REBOU;
-            blocos_rebou = 0U;
-            pode_rebentar = 0U;
-            contador_rebentamento = 0U;
-            AtualizaLED(1U); // acende LED PB1
-
-            DesenhaCorda(balao_raio_desenhado, 0U);
-            DesenhaBalao(balao_raio_desenhado, 0U);
-            balao_raio_desenhado = 0U;
-            lcd_draw_fillrect(BARRA_X, BARRA_Y, BARRA_LARGURA, BARRA_ALTURA, LCD_PRETO);
-            barra_desenhada_px = 0U;
-            barra_visual_px = 0U;
-            AtualizaPWM(0U);
-            DesenhaExplosao();
-
-            MostraEstado("REBOU!", LCD_VERMELHO);
-            snprintf(msg, sizeof(msg), "Rebentou em %02lu.%lu s!\r\n",
-                     (unsigned long)((tempo_jogo_blocos * JOGO_MS_POR_BLOCO) / 1000U),
-                     (unsigned long)(((tempo_jogo_blocos * JOGO_MS_POR_BLOCO) % 1000U) / 100U));
-            USART2_EnviaTexto(msg);
-            return 1U; // rebentou
-        }
-        return 0U;
-
-    default: // JOGO_REBOU ou JOGO_FIM
-        blocos_rebou++;
-        if (blocos_rebou >= REBOU_DURACAO_BLOCOS) {
-            estado_jogo = JOGO_ESPERA;
-            blocos_rebou = 0U;
-            tempo_jogo_blocos = 0U;
-            AtualizaLED(0U); // apaga LED PB1
-            AtualizaPWM(0U);
-
-            // Limpa zona da explosão e redesenha balão inicial
-            lcd_draw_fillrect(0U, 90U, 128U, 70U, LCD_PRETO);
-            BalaoInicial();
-            MostraCronometro();
-            MostraEstado("ABANA P/ JOGAR", LCD_AMARELO);
-            return 2U; // voltou à espera
-        }
-        return 0U;
+    else {
+        MostraNivelNoLCD(nivel_vibracao);
+        USART2_EnviaTexto("Ecra retomado\r\n");
     }
 }
 
@@ -860,11 +712,11 @@ static uint8_t AtualizaAnimacao(uint32_t rms_mediana_mg, uint32_t bloco) {
     uint8_t alvo, diferenca, novo_raio;
     uint8_t desenhou = 0U;
 
-    if ((estado_jogo != JOGO_ATIVO) || ((bloco % BARRA_PERIODO_BLOCOS) != 0U)) {
+    if ((bloco % BARRA_PERIODO_BLOCOS) != 0U) {
         return 0U;
     }
 
-    MostraValorJogo(rms_mediana_mg); // atualiza o valor numérico em mg e g
+    MostraValor(rms_mediana_mg); // atualiza o valor numérico em mg e g
 
     alvo = AlvoBarra(rms_mediana_mg);
     if (alvo > barra_visual_px) {
@@ -949,7 +801,7 @@ void MostraBloco(uint8_t metade, uint32_t numero) {
     float rms_g[3];
     float rms_total_g;
     uint32_t rms_total_mg, rms_mediana_mg;
-    uint8_t evento, mudou_nivel = 0U, mudou_animacao = 0U;
+    uint8_t mudou_nivel = 0U, mudou_animacao = 0U;
     uint8_t desenhou_lcd;
     const char *marca = "";
     char mensagem[128];
@@ -983,25 +835,17 @@ void MostraBloco(uint8_t metade, uint32_t numero) {
     rms_total_mg = (uint32_t)(rms_total_g * 1000.0f + 0.5f);
 
     rms_mediana_mg = MedianaMovel5(rms_total_mg); // filtro de mediana
-    evento = AtualizaJogo(rms_mediana_mg);
-    if (evento == 0U) {
+    if (pausa == 0U) { // em pausa o ecrã não muda, mas a USART continua
         mudou_nivel    = AtualizaNivel(rms_mediana_mg);
         mudou_animacao = AtualizaAnimacao(rms_mediana_mg, numero);
-        if ((estado_jogo == JOGO_ESPERA) && ((numero % 2U) == 0U)) {
-            MostraValorJogo(rms_mediana_mg); // leitura contínua em espera
-        }
     }
     desenhou_lcd = (uint8_t)(mudou_nivel || mudou_animacao);
 
-    if (evento == 1U)       marca = " [REBOU]";
-    else if (evento == 2U)  marca = " [MENU]";
-    else if (evento == 3U)  marca = " [INICIO]";
-    else if (evento == 4U)  marca = " [TEMPO ESGOTADO]";
-    else if (desenhou_lcd)  marca = " [LCD]";
+    if (desenhou_lcd) marca = " [LCD]";
 
     // Enviar dados pela USART2
     if (((numero % USART_LOG_CADA_BLOCOS) == 0U) ||
-        (evento != 0U) || (desenhou_lcd != 0U) ||
+        (desenhou_lcd != 0U) ||
         (blocos_dma_descartados != ultimo_aviso_dma))
     {
         if (blocos_dma_descartados != 0U) {
@@ -1029,12 +873,6 @@ void MostraBloco(uint8_t metade, uint32_t numero) {
         ultimo_aviso_dma = blocos_dma_descartados;
     }
 
-    if (evento == 1U) {
-        uint32_t t = (tempo_jogo_blocos * JOGO_MS_POR_BLOCO) / 100U;
-        snprintf(mensagem, sizeof(mensagem), ">>> REBENTOU em %lu.%lu s!\r\n",
-                 (unsigned long)(t / 10U), (unsigned long)(t % 10U));
-        USART2_EnviaTexto(mensagem);
-    }
 }
 
 // Tratar caracteres recebidos pela USART2
@@ -1043,15 +881,13 @@ static void TrataComando(char c) {
     if ((c == '\r') || (c == '\n')) return;
 
     if ((c == 'h') || (c == '?')) {
-        USART2_EnviaTexto("Comandos: j = iniciar jogo | h = ajuda\r\n");
+        USART2_EnviaTexto("Comandos: p = pausa / retoma o ecra | h = ajuda\r\n");
         return;
     }
 
     switch (c) {
-    case 'j':
-        if (estado_jogo == JOGO_ESPERA) {
-            IniciaJogo();
-        }
+    case 'p':
+        AlternaPausa();
         break;
     default:
         USART2_EnviaTexto("Comando desconhecido (h = ajuda).\r\n");
@@ -1065,6 +901,7 @@ static void TrataComando(char c) {
 int main(void) {
 
     uint32_t numero_bloco = 0;
+    uint32_t ultimo_bloco_botao = 0; // para o debounce do SW5
 
     // 1. Configurar clock do sistema a 72 MHz
     RCC_Config_HSE_PLL_Max();
@@ -1073,12 +910,12 @@ int main(void) {
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_AFIO, ENABLE);
     lcd_init();
 
-    // Desenhar a interface do jogo diretamente (ecrã único)
-    DesenhaEcraJogo();
+    // Desenhar o ecrã do monitor
+    DesenhaEcra();
 
     // 3. Inicialização dos periféricos
     USART2_Config();      // USART2 com interrupção RX
-    ConfiguraLED();       // LED PB1 (rebentamento)
+    ConfiguraLED();       // LED PB1 (alerta ALTA)
     ADC1_DMA_Config();    // ADC1 e DMA1 com interrupções HT/TC
     TIM3_Config_200Hz();  // Timer 3 a 200 Hz
     PWM_LED_Config();     // PWM no LED PB0 (TIM3_CH3)
@@ -1087,9 +924,9 @@ int main(void) {
 
     // 4. Mensagens iniciais na USART2
     USART2_EnviaTexto("\r\n========================================\r\n");
-    USART2_EnviaTexto("PROJETO SISEM - DESAFIO DO BALAO\r\n");
+    USART2_EnviaTexto("PROJETO SISEM - MONITOR DE VIBRACOES\r\n");
     USART2_EnviaTexto("ADC + DMA (NVIC) + TIM3 (TRGO/PWM) + LCD\r\n");
-    USART2_EnviaTexto("200 Hz | 3 Eixos | Med5 | POP = 500 mg\r\n");
+    USART2_EnviaTexto("200 Hz | 3 Eixos | Med5 | Barra 0-500 mg\r\n");
     USART2_EnviaTexto("========================================\r\n");
 
     // 5. Iniciar o DMA e o TIM3
@@ -1114,11 +951,11 @@ int main(void) {
         comando_usart      = 0;
         __enable_irq();
 
-        // Botão SW5: se estiver em espera, inicia o jogo
-        if (botao != 0U) {
-            if (estado_jogo == JOGO_ESPERA) {
-                IniciaJogo();
-            }
+        // Botão SW5: pausa / retoma o ecrã.
+        // Debounce: ignora toques a menos de 2 blocos (320 ms) do anterior.
+        if ((botao != 0U) && ((numero_bloco - ultimo_bloco_botao) >= 2U)) {
+            ultimo_bloco_botao = numero_bloco;
+            AlternaPausa();
         }
 
         // Trata comando recebido pela USART2
