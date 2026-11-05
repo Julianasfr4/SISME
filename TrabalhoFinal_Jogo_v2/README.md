@@ -6,7 +6,7 @@ A aquisição e o processamento não mudaram. Mudaram a interface no LCD, a lóg
 
 ## Como se joga
 
-1. Ao ligar, aparece o **menu**, numa página à parte e o mais simples possível: o título, os três níveis (FACIL, NORMAL, DIFICIL) e a dica **SEGURA SW5: JOGAR**. O nível escolhido tem uma seta `>` e a sua cor; os outros ficam a cinzento.
+1. Ao ligar, aparece o **menu**, numa página à parte e o mais simples possível: o título, os três níveis (FACIL, NORMAL, DIFICIL), o recorde do nível escolhido (**REC: ss.d s**, ou **REC: --.- s** se ainda não há) e a dica **SEGURA SW5: JOGAR**. O nível escolhido tem uma seta `>` e a sua cor; os outros ficam a cinzento.
 2. **Clique** no SW5 (largar antes de 1 s): passa para o nível seguinte.
 3. **Segurar** o SW5 durante 1 s: começa o desafio. O ecrã muda para a página do jogo e aparece a contagem **PREPARA... 3, 2, 1**.
 4. Aparece **VAI! ABANA!** e o cronómetro (**TEMPO: ss.d s**) começa a contar.
@@ -15,7 +15,7 @@ A aquisição e o processamento não mudaram. Mudaram a interface no LCD, a lóg
 7. Se passarem 20 s sem rebentar, aparece **TEMPO ESGOTADO**.
 8. Passados cerca de 2,6 s, volta sozinho ao menu.
 
-Os recordes ficam em RAM, um por nível, e só aparecem no terminal (`>>> REBENTOU em X s | Recorde NORMAL: Y s`). Perdem-se ao fazer reset.
+Os recordes ficam em RAM, um por nível, e perdem-se ao fazer reset. Aparecem no LCD, a ciano (no menu, para o nível escolhido, e no jogo, à direita do nome do nível), e no terminal (`>>> REBENTOU em X s | Recorde NORMAL: Y s`).
 
 ## Controlos
 
@@ -28,7 +28,7 @@ Os recordes ficam em RAM, um por nível, e só aparecem no terminal (`>>> REBENT
 | Terminal: `j` | Começa o desafio | Só no menu |
 | Terminal: `r` | Apaga os recordes dos 3 níveis | Só no menu |
 
-**Nível:** muda o limiar de rebentamento (300, 500 ou 700 mg). A barra enche até esse valor, por isso só rebenta com a barra cheia. Durante o jogo, o nome do nível aparece por cima da barra, na cor do nível.
+**Nível:** muda o limiar de rebentamento (300, 500 ou 700 mg). A barra enche até esse valor, por isso só rebenta com a barra cheia. Durante o jogo, o nome do nível aparece por cima da barra, à esquerda e na cor do nível, com o recorde à direita (`MostraRecorde()`).
 
 **Clique ou segurar:** a interrupção EXTI1 só avisa que o botão foi carregado. Depois, em cada bloco de 160 ms, o `main` lê o pino PA1 (`GPIO_ReadInputDataBit`): se já foi largado, é um clique; se continua carregado ao fim de 6 blocos (≈1 s), começa o jogo (`BotaoCarregado()`, `VerificaBotao()`).
 
@@ -81,7 +81,7 @@ O NVIC é configurado antes de ligar o DMA e o TIM3, para não perder a primeira
 | Ecrã inicial | Não existia | Página à parte com o menu dos níveis (`DesenhaMenu()`, `DesenhaOpcoes()`) |
 | Início do jogo | Começava sozinho ao abanar | Segurar o SW5 1 s (ou `j`), contagem 3, 2, 1 (`IniciaJogo()`, `DesenhaEcraJogo()`) |
 | Cronómetro | Não existia | Conta blocos de 160 ms e mostra `TEMPO: ss.d s` |
-| Recorde | Não existia | Melhor tempo por nível em `recorde_blocos`, só no terminal e em "NOVO RECORDE!" |
+| Recorde | Não existia | Melhor tempo por nível em `recorde_blocos`, no LCD (`REC: ss.d s` no menu e no jogo, `MostraRecorde()`), no terminal e em "NOVO RECORDE!" |
 | Escala da barra | "0" e "500 mg" à volta da barra | Tirada: só fica o nome do nível |
 | Tempo limite | Não existia | 125 blocos = 20 s (`JOGO_LIMITE_BLOCOS`) |
 | Ritmo da animação | A cada 4 blocos (640 ms) | A cada 2 blocos (320 ms), `BARRA_PERIODO_BLOCOS = 2` |

@@ -130,6 +130,9 @@
 // Menu: uma linha por nivel (texto em tamanho 2 = 16 px de altura).
 #define MENU_Y0              40U
 #define MENU_PASSO           28U
+#define MENU_REC_X           31U  // "REC: 05.4 s" = 11 caracteres x 6 px, centrado
+#define MENU_REC_Y          122U
+#define JOGO_REC_X           58U  // a direita do nome do nivel
 
 // Zonas de cor da barra (em pixeis): verde, amarelo, vermelho.
 #define BARRA_ZONA_AMARELA   40U
@@ -636,7 +639,7 @@ static uint8_t dificuldade = DIF_NORMAL;
 #define LIMIAR_ATUAL_MG  (limiar_dificuldade_mg[dificuldade])
 
 // Recorde (melhor tempo) por dificuldade; 0 = ainda sem recorde.
-// Ja nao aparece no LCD: so no terminal e na mensagem "NOVO RECORDE!".
+// Aparece no menu (nivel escolhido) e no jogo, ao lado do nome do nivel.
 static uint32_t recorde_blocos[NUM_DIFICULDADES] = {0U, 0U, 0U};
 
 // Marcas escritas pelas rotinas de interrupcao (stm32f10x_it.c).
@@ -685,12 +688,31 @@ static uint8_t Comprimento(const char *texto)
     return n;
 }
 
-// Nome do nivel escolhido, centrado por cima da barra (y = 53).
+// Nome do nivel escolhido, a esquerda por cima da barra (y = 53).
 static void MostraDificuldade(void)
 {
-    const char *nome = nome_dificuldade[dificuldade];
-    lcd_draw_string((uint8_t)(64U - Comprimento(nome) * 3U), 53U,
-                    (unsigned char *)nome, cor_dificuldade[dificuldade], 1U);
+    lcd_draw_string(10U, 53U, (unsigned char *)nome_dificuldade[dificuldade],
+                    cor_dificuldade[dificuldade], 1U);
+}
+
+// Recorde do nivel escolhido: "REC: 05.4 s", ou "REC: --.- s" se ainda nao ha.
+// O texto em tamanho 1 pinta o seu fundo, por isso escreve por cima do antigo.
+static void MostraRecorde(uint8_t x, uint8_t y)
+{
+    char texto[20];
+    uint32_t decimas = (recorde_blocos[dificuldade] * JOGO_MS_POR_BLOCO) / 100U;
+
+    if (recorde_blocos[dificuldade] == 0U)
+    {
+        snprintf(texto, sizeof(texto), "REC: --.- s");
+    }
+    else
+    {
+        snprintf(texto, sizeof(texto), "REC: %02lu.%lu s",
+                 (unsigned long)(decimas / 10U),
+                 (unsigned long)(decimas % 10U));
+    }
+    lcd_draw_string(x, y, (unsigned char *)texto, LCD_CIANO, 1U);
 }
 
 // Titulo e linha laranja, iguais no menu e no jogo.
@@ -730,9 +752,12 @@ static void DesenhaOpcoes(void)
                             (unsigned char *)nome, LCD_CINZA, 2U);
         }
     }
+
+    // Recorde do nivel escolhido, centrado por cima da dica.
+    MostraRecorde(MENU_REC_X, MENU_REC_Y);
 }
 
-// Pagina inicial: titulo, os tres niveis e uma dica.
+// Pagina inicial: titulo, os tres niveis, o recorde e uma dica.
 static void DesenhaMenu(void)
 {
     lcd_draw_fillrect(0U, 0U, 128U, 160U, LCD_PRETO);
@@ -1094,6 +1119,7 @@ static void DesenhaEcraJogo(void)
     DesenhaCabecalho();
     MostraCronometro();
     MostraDificuldade();
+    MostraRecorde(JOGO_REC_X, 53U);
 
     // Moldura fixa da barra. Interior: x=12..115, y=73..80.
     lcd_draw_fillrect(10U, 70U, 108U, 1U, LCD_BRANCO);
@@ -1214,6 +1240,7 @@ static uint8_t AtualizaJogo(uint32_t rms_mediana_mg)
             {
                 recorde_blocos[dificuldade] = tempo_jogo_blocos;
                 MostraEstado("NOVO RECORDE!", LCD_CIANO);
+                MostraRecorde(JOGO_REC_X, 53U);
             }
             else
             {
@@ -1558,6 +1585,7 @@ static void TrataComando(char c)
         {
             recorde_blocos[i] = 0U;
         }
+        MostraRecorde(MENU_REC_X, MENU_REC_Y);
         USART2_EnviaTexto("Recordes apagados.\r\n");
         break;
     case '1':
